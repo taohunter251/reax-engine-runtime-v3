@@ -9,6 +9,10 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# The frontend must fork before numerical libraries create worker threads.
+for variable in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS'):
+    os.environ[variable] = '1'
+
 def install(engine, encoder, gpu, front):
     import torch
     from reaxv2.assets import Assets
