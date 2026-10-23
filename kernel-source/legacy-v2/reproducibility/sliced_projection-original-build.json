@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/usr/local/cuda-13.0/bin/nvcc",
+    "-O3",
+    "-arch=sm_120a",
+    "--cubin",
+    "-Xptxas=-v",
+    "-I/workspace/reax-precision-search/output/sliced-linear8-server-r1",
+    "/workspace/reax-precision-search/snapshots/sliced-linear8-server-r1/sliced_linear8.cu",
+    "-o",
+    "/workspace/reax-precision-search/output/sliced-linear8-server-r1/sliced_linear8.cubin"
+  ],
+  "attribution": "NG5 load/MMA/epilogue helpers; integer part followed by BF16 contribution into FP32 registers",
+  "baseline_sha256": "1d6410833144ece27b1ab85812e94868d5ff4fe714139109bf4a68116243ed0d",
+  "header_sha256": "9e94457532adde482b54d318eccda2ad6686e92f1207f1c7aae9ddb475c81512",
+  "source_sha256": "df29cfa6449746b147094eab04e7e56e3f3831cdd5c0f608ce65e8f49d7c83d8",
+  "binary_sha256": "664c30f9fdbf0a94006b9706b8d60f38ff0867cfec61604221eb9a387136504b"
+}

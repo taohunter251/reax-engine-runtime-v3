@@ -1,0 +1,8 @@
+/build/
+__pycache__/
+*.pyc
+*.cubin
+*.pt
+*.safetensors
+.env
+AGENTS.md

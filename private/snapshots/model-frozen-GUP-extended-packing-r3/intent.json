@@ -1,0 +1,6 @@
+{
+  "input": "Repeat genuine layer20activations tocoverallpackedrowcounts; same bank/kernel binaries as previously tested.",
+  "maximum_rows": 2304,
+  "quantization_unchanged": true,
+  "reason": "R4fullmodelgains3.0-3.8%commonR608..896; highR1344..1376fallbacklacksnewGUProute."
+}

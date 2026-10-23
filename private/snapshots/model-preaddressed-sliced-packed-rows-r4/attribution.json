@@ -1,0 +1,5 @@
+{
+  "parent": "Public UID56 NG9B loader plus prior attributed sliced_linear8.",
+  "parent_header_sha256": "2f45bcf44a3f0e338cf9c5978707f4aeb204bc5effa0cc0604d425dde6180edb",
+  "local_change": "Separate loop-depth and matrix-stride for grouped INT8 products, retaining original BF16 partials and ordered fold."
+}

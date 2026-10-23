@@ -1,0 +1,1 @@
+{"parent": "model-preaddressed-GUP-r1", "source_sha256": "362afa0ebc61fdf84e80f13af9249769ae0011455b7de91cb4d84150c6739fda", "change": "Replace BF16-rounded SiLU evaluation with exhaustive, GPU-generated exact BF16 table; all weights, MMA groups and matrix layouts unchanged."}

@@ -1,0 +1,111 @@
+[
+  {
+    "name": "kkt2n",
+    "command": [
+      "nvcc",
+      "-cubin",
+      "-arch=sm_120a",
+      "-O3",
+      "-Xptxas",
+      "-v",
+      "-o",
+      "kkt2n.cubin",
+      "vendor/uid176/kkt2n.cu"
+    ],
+    "returncode": 0,
+    "sha256": "fd5b50c85669d3f106d3415523b62651bf5e6ace69cb0531404059ba87000c3a",
+    "expected": "fd5b50c85669d3f106d3415523b62651bf5e6ace69cb0531404059ba87000c3a",
+    "byte_identical": true
+  },
+  {
+    "name": "ngemm9l",
+    "command": [
+      "nvcc",
+      "-cubin",
+      "-arch=sm_120a",
+      "-O3",
+      "-Xptxas",
+      "-v",
+      "-o",
+      "ngemm9l.cubin",
+      "vendor/uid176/ngemm9l.cu"
+    ],
+    "returncode": 0,
+    "sha256": "f35d8d2a2d44d01a0de8154adeaac94651035aaf83aaf04e021f048d37b57e88",
+    "expected": "f35d8d2a2d44d01a0de8154adeaac94651035aaf83aaf04e021f048d37b57e88",
+    "byte_identical": true
+  },
+  {
+    "name": "ngemm9t",
+    "command": [
+      "nvcc",
+      "-cubin",
+      "-arch=sm_120a",
+      "-O3",
+      "-Xptxas",
+      "-v",
+      "-o",
+      "ngemm9t.cubin",
+      "vendor/uid176/ngemm9t.cu"
+    ],
+    "returncode": 0,
+    "sha256": "111b70b04ac63f4c12f82145d45a1ae64bafb3c5f812fd3dae4b195b08e7f70d",
+    "expected": "111b70b04ac63f4c12f82145d45a1ae64bafb3c5f812fd3dae4b195b08e7f70d",
+    "byte_identical": true
+  },
+  {
+    "name": "ngr",
+    "command": [
+      "nvcc",
+      "-cubin",
+      "-arch=sm_120a",
+      "-O3",
+      "-Xptxas",
+      "-v",
+      "-o",
+      "ngr.cubin",
+      "vendor/uid176/ngr.cu"
+    ],
+    "returncode": 0,
+    "sha256": "15dc8936691b884e1364a5c57f64470e354bc59c6c64c1244307fcf614f8e889",
+    "expected": "15dc8936691b884e1364a5c57f64470e354bc59c6c64c1244307fcf614f8e889",
+    "byte_identical": true
+  },
+  {
+    "name": "xa",
+    "command": [
+      "nvcc",
+      "-cubin",
+      "-arch=sm_120a",
+      "-O3",
+      "-Xptxas",
+      "-v",
+      "-o",
+      "xa.cubin",
+      "vendor/uid176/xa.cu"
+    ],
+    "returncode": 0,
+    "sha256": "8d119f6b271de9ccf86d58b99b5a37299cc9460b1c247f4a74e70bd8154762aa",
+    "expected": "8d119f6b271de9ccf86d58b99b5a37299cc9460b1c247f4a74e70bd8154762aa",
+    "byte_identical": true
+  },
+  {
+    "name": "pron",
+    "command": [
+      "nvcc",
+      "-cubin",
+      "-arch=sm_120a",
+      "-O3",
+      "-DPRON_SHIP",
+      "-Xptxas",
+      "-v",
+      "-o",
+      "pron.cubin",
+      "vendor/uid164/pron.cu"
+    ],
+    "returncode": 0,
+    "sha256": "f34ec4fb457a129b920928ea3355e689cd739a77d94b75e6236da5e053a34429",
+    "expected": "f34ec4fb457a129b920928ea3355e689cd739a77d94b75e6236da5e053a34429",
+    "byte_identical": true
+  }
+]

@@ -1,0 +1,16 @@
+{
+  "exit_code": 0,
+  "command": [
+    "/usr/local/cuda-13.0/bin/nvcc",
+    "-O3",
+    "-std=c++17",
+    "-arch=sm_120a",
+    "--cubin",
+    "-Xptxas=-v",
+    "/workspace/reax-local-quant-lab/snapshots/model-addressed-tail-activation-table-r1/band_gate_up.cu",
+    "-o",
+    "/workspace/reax-local-quant-lab/snapshots/model-addressed-tail-activation-table-r1/band_gate_up.cubin"
+  ],
+  "source_sha256": "404ae8d6902d6be8febf44972f99b7d87284482986c7b3a7bbe84cb6a1ac37c4",
+  "binary_sha256": "e0dd831fac33e890f17c621ab3cc8302d842765ef5c4c9e563cef444add0fa17"
+}

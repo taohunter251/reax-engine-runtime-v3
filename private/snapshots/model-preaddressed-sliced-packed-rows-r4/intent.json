@@ -1,0 +1,6 @@
+{
+  "parent": "model-preaddressed-sliced-projections-r1",
+  "change": "Use actualpackedrowcounts, allfourlengths, andsavedrealGDNinput. Samecubin andquantization.",
+  "purpose": "Replace nearest-row interpolation with explicit exact-performance routes and fallback for inferior shapes.",
+  "model_or_answer_fit": false
+}

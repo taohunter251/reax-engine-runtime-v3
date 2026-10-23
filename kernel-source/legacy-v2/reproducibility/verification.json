@@ -1,0 +1,17 @@
+[
+  {
+    "kernel": "gate_up",
+    "sha256": "59af3954d443b50df512f58d9156519f0945425cc4b73266d3c43e2697b8ac02",
+    "byte_identical": true
+  },
+  {
+    "kernel": "sliced_projection",
+    "sha256": "664c30f9fdbf0a94006b9706b8d60f38ff0867cfec61604221eb9a387136504b",
+    "byte_identical": true
+  },
+  {
+    "kernel": "rotation_prepare",
+    "sha256": "7857f2063a8097fff50391067ef38de99ec2b104aba8d2ecf7d80cd43f9375df",
+    "byte_identical": true
+  }
+]

@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "license": "MIT",
+  "toolchain": {
+    "nvcc": "13.0.88",
+    "architecture": "sm_120a",
+    "compiler_flags": [
+      "-O3",
+      "-arch=sm_120a",
+      "--cubin",
+      "-Xptxas=-v"
+    ]
+  },
+  "kernels": [
+    {
+      "name": "gate_up",
+      "source": "src/native_hybrid8.cu",
+      "source_sha256": "b8baf626aa69c32db64ec35f4eb4ca8886fb2f4f953d77617bc0322cbd02b00e",
+      "binary_sha256": "59af3954d443b50df512f58d9156519f0945425cc4b73266d3c43e2697b8ac02",
+      "binary_name": "native_hybrid8.cubin",
+      "inference_image_path": "/opt/reax-v2/parameters/kernels/59af3954d443b50df512f58d9156519f0945425cc4b73266d3c43e2697b8ac02.cubin",
+      "header": "src/hybrid8_tiles.cuh",
+      "header_sha256": "9e94457532adde482b54d318eccda2ad6686e92f1207f1c7aae9ddb475c81512",
+      "derived_from": "NG5 matrix tile and pipeline helpers from declared UID56 parent"
+    },
+    {
+      "name": "sliced_projection",
+      "source": "src/sliced_linear8.cu",
+      "source_sha256": "df29cfa6449746b147094eab04e7e56e3f3831cdd5c0f608ce65e8f49d7c83d8",
+      "binary_sha256": "664c30f9fdbf0a94006b9706b8d60f38ff0867cfec61604221eb9a387136504b",
+      "binary_name": "sliced_linear8.cubin",
+      "inference_image_path": "/opt/reax-v2/parameters/kernels/664c30f9fdbf0a94006b9706b8d60f38ff0867cfec61604221eb9a387136504b.cubin",
+      "header": "src/hybrid8_tiles.cuh",
+      "header_sha256": "9e94457532adde482b54d318eccda2ad6686e92f1207f1c7aae9ddb475c81512",
+      "derived_from": "NG5 matrix tile and pipeline helpers from declared UID56 parent"
+    },
+    {
+      "name": "rotation_prepare",
+      "source": "src/block_rotation.cu",
+      "source_sha256": "d671a57703389a03e846b1f98605a67115b0eabeef5e5f58f28665e8230b4034",
+      "binary_sha256": "7857f2063a8097fff50391067ef38de99ec2b104aba8d2ecf7d80cd43f9375df",
+      "binary_name": "block_rotation.cubin",
+      "inference_image_path": "/opt/reax-v2/parameters/kernels/7857f2063a8097fff50391067ef38de99ec2b104aba8d2ecf7d80cd43f9375df.cubin"
+    }
+  ],
+  "upstream": {
+    "uid56_repository": "https://github.com/masterdev777/reax-uid56-kernels",
+    "uid56_revision": "93524e7d00252b96f0619f0c76e12f7da4f50c1e",
+    "ng5_image": "ghcr.io/masterdev777/s1k@sha256:23dcdecc1519edf813699ab48adadd1df07a269016da3816bee37cba84e8a89d",
+    "ng5_source_sha256": "1d6410833144ece27b1ab85812e94868d5ff4fe714139109bf4a68116243ed0d"
+  }
+}

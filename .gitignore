@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.cubin
+parameters/
+verification/
+*.so

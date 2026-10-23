@@ -1,0 +1,4 @@
+{
+  "change": "Compiler only, CUDA13.0.88->CUDA13.4.92. Source, tile routes, model parameters, exhaustive BF16 table unchanged.",
+  "promotion": "Requires fresh operator and full graph proof. No publication or production mutation."
+}

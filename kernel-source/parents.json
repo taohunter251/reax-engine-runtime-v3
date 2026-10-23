@@ -1,0 +1,47 @@
+[
+  {
+    "uid": 56,
+    "digest": "23dcdecc1519edf813699ab48adadd1df07a269016da3816bee37cba84e8a89d",
+    "files": [
+      "/opt/s1eng/",
+      "/opt/reax/",
+      "/opt/reax-v3/"
+    ]
+  },
+  {
+    "uid": 176,
+    "digest": "01e6e113da15bbc5f992779bb099a55d99b936ab088b64fb4967ef557f72db6d",
+    "files": [
+      "/opt/s1eng/",
+      "/opt/reax/",
+      "/opt/reax-v3/"
+    ]
+  },
+  {
+    "uid": 164,
+    "digest": "944fa7aee414607c4b620de5600224fb7b844f0f9d844031b07f591b8b7455f7",
+    "files": [
+      "/opt/s1eng/",
+      "/opt/reax/",
+      "/opt/reax-v3/"
+    ]
+  },
+  {
+    "uid": 240,
+    "digest": "d57f7afa80e9e174132bdc5332e9064fd12de7bec6ba42f711a4752a3e36754a",
+    "files": [
+      "/opt/s1eng/",
+      "/opt/reax/",
+      "/opt/reax-v3/"
+    ]
+  },
+  {
+    "uid": 57,
+    "digest": "348257dd4e676dd92278304c0931fbfbf352b1150cbd3de3a8516ffbfce60181",
+    "files": [
+      "/opt/s1eng/",
+      "/opt/reax/",
+      "/opt/reax-v3/"
+    ]
+  }
+]

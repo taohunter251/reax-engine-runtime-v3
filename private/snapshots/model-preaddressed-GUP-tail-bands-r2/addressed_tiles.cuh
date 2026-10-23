@@ -1,0 +1,519 @@
+// NG9B: BK=64 two-stage cp.async bf16 GEMMs for sm_120 (RTX PRO 6000), C[M, N] = A[M, K] @ B[N, K]^T, plus the
+// gate|up GEMM with the SwiGLU epilogue. Same arithmetic as ngemm5.cu (byte-exact vs the unsplit cuBLASLt pins): fp32
+// accumulation over K in ascending k16 order through mma.sync m16n8k16, one RN round to bf16; SwiGLU = ngemm5's
+// swiglu1 (silu_f32 = x / (1 + expf(-x)) IEEE division, bf16 round, times u, bf16 round).
+// Why BK=64 / 2 stages (NG9B, Lium 2026-10-20): the 128x256 GEMMs run at the 600 W power cap in the paired 2-lane
+// regime (SM clock 2.20-2.33 GHz vs 2.43 GHz without global loads); cycles are within ~2-4 % of the no-load bound and
+// the CTA barrier costs ~0.25 % of cycles, so the lever is energy per byte moved: 128-byte row segments per k-tile (full
+// L2 lines, half the L2 requests of BK=32) raise the clock 1-3 % and the paired GEMM rate ~3 %.
+// Mainloop: cp.async ring (STAGES deep), XOR-swizzled smem + ldmatrix, fragments double-buffered across k-steps,
+// one __syncthreads per k-tile, the refill of tile kt+STAGES-1 issued as one block at k-step 0 of tile kt (ngemm5
+// timing), serpentine mma order (row i odd walks the n-tiles backwards; order of independent accumulators only).
+// Epilogues: plain = stmatrix.x4 staging + 16-byte stores; SwiGLU = register-direct with the B tile rows interleaved
+// per warp column (WTN/2 gate rows then the matching WTN/2 up rows), so each thread holds g and u of its own outputs.
+// Kernels (arg order = ngemm5 / ng.py: A, B, C, M, N, K, lda, ldc, chunk, mb, ws, flags; chunk / ws / flags unused):
+//   nh9_*: unsplit, rows [0, mb) big tiles (CTAs 0 .. Tb-1, m fastest), rows [mb, M) small tiles (as nh_*)
+//   nsw9_*: N = 2H stacked [Wg; Wu], out [M, H] (as nsw_*)
+// Needs N % BN == 0, K % BK == 0, 16-byte aligned rows. Small tiles may use BK=32 (their own swizzle / stages).
+#include <cuda_bf16.h>
+#include <stdint.h>
+
+#define DEVI __device__ __forceinline__
+
+namespace addressed_integer {
+
+DEVI uint32_t smem_u32(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
+DEVI void cp_async16(uint32_t dst, const void* src, bool pred) {
+    int sz = pred ? 16 : 0;
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(dst), "l"(src), "r"(sz));
+}
+DEVI void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
+template <int N>
+DEVI void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+DEVI void ldsm_x4(uint32_t addr, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(addr));
+}
+DEVI void mma16816(float* d,const uint32_t* a,uint32_t b0,uint32_t b1) {
+ uint32_t c0=__float_as_uint(d[0]),c1=__float_as_uint(d[1]);
+ uint32_t c2=__float_as_uint(d[2]),c3=__float_as_uint(d[3]);
+ asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+  : "+r"(c0),"+r"(c1),"+r"(c2),"+r"(c3)
+  : "r"(a[0]),"r"(a[1]),"r"(a[2]),"r"(a[3]),"r"(b0),"r"(b1));
+ d[0]=__uint_as_float(c0);d[1]=__uint_as_float(c1);
+ d[2]=__uint_as_float(c2);d[3]=__uint_as_float(c3);
+}
+DEVI void named_sync(int id, int n) { asm volatile("bar.sync %0, %1;\n" ::"r"(id), "r"(n) : "memory"); }
+DEVI uint32_t pack_bf2(float a, float b) {
+    __nv_bfloat162 h = __floats2bfloat162_rn(a, b);
+    return *reinterpret_cast<uint32_t*>(&h);
+}
+DEVI float rbf(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
+// split-K fold of slice sums (cuBLASLt reduction schemes): 1 INPLACE, 2 COMPUTE_TYPE, 4 OUTPUT_TYPE
+template <int MODE>
+DEVI float combine(float total, float acc, bool first) {
+    if constexpr (MODE == 2) return first ? acc : total + acc;
+    else if constexpr (MODE == 1) return first ? rbf(acc) : rbf(total + acc);
+    else return first ? rbf(acc) : total + rbf(acc);
+}
+DEVI float silu_f32(float x) { return __fdiv_rn(x, 1.0f + expf(-x)); }
+DEVI __nv_bfloat16 swiglu1(__nv_bfloat16 g, __nv_bfloat16 u) {
+    float s = __bfloat162float(__float2bfloat16_rn(silu_f32(__bfloat162float(g))));
+    return __float2bfloat16_rn(s * __bfloat162float(u));
+}
+
+template <int BK>
+DEVI int swz_f(int r) {
+    if constexpr (BK == 32) return (r >> 1) & 3;
+    else return r & 7;
+}
+
+// EPI: 2 = plain stmatrix epilogue, 1 = SwiGLU register epilogue (interleaved B rows)
+template <int BM_, int BN_, int BK_, int WARPS_M, int WARPS_N, int STAGES_, int EPI_>
+struct Cfg {
+    static constexpr int BM = BM_, BN = BN_, BK = BK_, STAGES = STAGES_, WM = WARPS_M, WN = WARPS_N, EPI = EPI_;
+    static constexpr int CW = WARPS_M * WARPS_N;
+    static constexpr int THREADS = CW * 32;
+    static constexpr int WTM = BM / WARPS_M, WTN = BN / WARPS_N;
+    static constexpr int MT = WTM / 16, NT = WTN / 8, KS = BK / 16, CH = BK / 8;
+    static constexpr int A_STAGE = BM * BK, B_STAGE = BN * BK;
+    static constexpr int SMEM_PIPE = STAGES * (A_STAGE + B_STAGE) * 2;
+    static constexpr int CPAD = 8;
+    static constexpr int SMEM_EPI = BM * (BN + CPAD) * 2;
+    static constexpr int SMEM = SMEM_PIPE > SMEM_EPI ? SMEM_PIPE : SMEM_EPI;
+    static_assert(MT >= 1 && NT % 2 == 0 && KS % 2 == 0 && STAGES >= 2, "tile");
+};
+
+// per-thread chunk loader: chunk q < NA = A rows r0 + q RS, q >= NA = B rows r0 + (q - NA) RS (RS = threads / chunks
+// per row); global element offsets precomputed once
+template <class C>
+struct Loader {
+    static constexpr int RS = C::THREADS / C::CH;
+    static constexpr int NA = (C::BM + RS - 1) / RS;
+    static constexpr int NB = (C::BN + RS - 1) / RS;
+    static constexpr int NQ = NA + NB;
+    const __nv_bfloat16* pa;
+    const __nv_bfloat16* pb;
+    uint32_t offa[NA], offb[NB];
+    uint32_t dst0;
+    uint32_t amask;
+    int r0;
+    DEVI void init(const __nv_bfloat16* A, const __nv_bfloat16* B, int m0, int n0, int n1, int M, int K, int lda) {
+        const int tid = threadIdx.x;
+        r0 = tid / C::CH;
+        const int c = tid % C::CH;
+        dst0 = (r0 * C::BK + ((c ^ swz_f<C::BK>(r0)) * 8)) * 2;
+        pa = A;
+        pb = B;
+        amask = 0;
+#pragma unroll
+        for (int q = 0; q < NA; ++q) {
+            const int r = r0 + q * RS;
+            const int gm = m0 + r;
+            const bool ok = gm < M;
+            offa[q] = (uint32_t)((ok ? gm : 0) * lda + c * 8);
+            amask |= (ok ? 1u : 0u) << q;
+        }
+#pragma unroll
+        for (int q = 0; q < NB; ++q) {
+            const int r = r0 + q * RS;
+            int wr;
+            if (C::EPI == 1 && n1 >= 0) {   // warp column wn: gate rows wn*WTN/2.. then the matching up rows
+                const int wn = r / C::WTN, h = (r % C::WTN) >= C::WTN / 2, cc = r % (C::WTN / 2);
+                wr = (h ? n1 : n0) + wn * (C::WTN / 2) + cc;
+            } else {
+                wr = (n1 < 0 || r < C::BN / 2) ? n0 + r : n1 + r - C::BN / 2;
+            }
+            offb[q] = (uint32_t)(wr * K + c * 8);
+        }
+    }
+    DEVI void issue_all(uint32_t sA, uint32_t sB, int k0) {
+#pragma unroll
+        for (int q = 0; q < NQ; ++q) {
+            if (q < NA) {
+                if (C::BM % RS == 0 || r0 + q * RS < C::BM)
+                    cp_async16(sA + dst0 + q * RS * C::BK * 2, pa + offa[q] + k0, (amask >> q) & 1);
+            } else {
+                const int qb = q - NA;
+                if (C::BN % RS == 0 || r0 + qb * RS < C::BN)
+                    cp_async16(sB + dst0 + qb * RS * C::BK * 2, pb + offb[qb] + k0, true);
+            }
+        }
+    }
+};
+
+template <class C>
+struct Frag {
+    uint32_t a_off[C::KS], b_off[C::KS];
+    uint32_t af[2][C::MT][4];
+    uint32_t bf[2][C::NT][2];
+    DEVI void init(int wm, int wn, int lane) {
+        constexpr int BK = C::BK;
+        const int a_r = wm * C::WTM + (lane % 16);
+        const int a_f = swz_f<BK>(lane % 16);
+        const int a_kc = lane / 16;
+        const int b_r = wn * C::WTN + (lane / 16) * 8 + (lane % 8);
+        const int b_f = swz_f<BK>((lane / 16) * 8 + (lane % 8));
+        const int b_kc = (lane / 8) % 2;
+#pragma unroll
+        for (int ks = 0; ks < C::KS; ++ks) {
+            a_off[ks] = (a_r * BK + (((ks * 2 + a_kc) ^ a_f) * 8)) * 2;
+            b_off[ks] = (b_r * BK + (((ks * 2 + b_kc) ^ b_f) * 8)) * 2;
+        }
+    }
+    DEVI void load(int buf, uint32_t sA, uint32_t sB, int ks) {
+        const uint32_t a = sA + a_off[ks];
+        const uint32_t b = sB + b_off[ks];
+#pragma unroll
+        for (int i = 0; i < C::MT; ++i)
+            ldsm_x4(a + i * 16 * C::BK * 2, af[buf][i][0], af[buf][i][1], af[buf][i][2], af[buf][i][3]);
+#pragma unroll
+        for (int j = 0; j < C::NT; j += 2)
+            ldsm_x4(b + j * 8 * C::BK * 2, bf[buf][j][0], bf[buf][j][1], bf[buf][j + 1][0], bf[buf][j + 1][1]);
+    }
+};
+
+// acc = A[m0:m0+BM, :] @ B-tile^T over all of K, k ascending
+// FOLD != 0 (in-CTA split-K, ns9_*): every `chunk` columns of K (slice boundaries, multiples of 64) acc is folded into
+// tot by the pin's reduction scheme and restarted; otherwise acc holds the plain sum
+template <class C, int FOLD = 0, bool ADD = false>
+DEVI void mainloop(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B, int M, int K, int lda,
+                   int m0, int n0, int n1, __nv_bfloat16* smem, float (&acc)[C::MT][C::NT][4],
+                   float (*tot)[C::NT][4] = nullptr, int chunk = 0) {
+    constexpr int KS = C::KS, BK = C::BK, S = C::STAGES, MT = C::MT, NT = C::NT;
+    const uint32_t sA0 = smem_u32(smem);
+    const uint32_t sB0 = sA0 + S * C::A_STAGE * 2;
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const int KT = K / BK;
+    auto sa = [&](int s) { return sA0 + s * C::A_STAGE * 2; };
+    auto sb = [&](int s) { return sB0 + s * C::B_STAGE * 2; };
+    if constexpr (!ADD) {
+#pragma unroll
+    for (int i = 0; i < MT; ++i)
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+    }
+    Loader<C> ld;
+    ld.init(A, B, m0, n0, n1, M, K, lda);
+#pragma unroll
+    for (int t = 0; t < S - 1; ++t) {
+        if (t < KT) ld.issue_all(sa(t), sb(t), t * BK);
+        cp_commit();
+    }
+    Frag<C> fr;
+    fr.init(warp / C::WN, warp % C::WN, lane);
+    cp_wait<S - 2>();
+    __syncthreads();
+    fr.load(0, sa(0), sb(0), 0);
+    int s = 0;   // slot of tile kt
+    const int kt_ch = FOLD ? chunk / BK : KT;
+    int in_slice = 0;
+    bool first = true;
+    for (int kt = 0; kt < KT; ++kt) {
+#pragma unroll
+        for (int ks = 0; ks < KS; ++ks) {
+            if (ks == KS - 1) {
+                cp_wait<S - 2>();
+                __syncthreads();
+            }
+            if (ks == 0) {   // refill the slot tile kt-1 used (free since the barrier of its last k-step)
+                const int tt = kt + S - 1;
+                if (tt < KT) ld.issue_all(sa(tt % S), sb(tt % S), tt * BK);
+            }
+            if (ks < KS - 1 || kt + 1 < KT) {
+                const int ns = ks < KS - 1 ? s : (s + 1 == S ? 0 : s + 1);
+                fr.load((ks + 1) & 1, sa(ns), sb(ns), ks < KS - 1 ? ks + 1 : 0);
+            }
+            const int cb = ks & 1;
+#pragma unroll
+            for (int i = 0; i < MT; ++i)
+#pragma unroll
+                for (int jj = 0; jj < NT; ++jj) {
+                    const int j = (i & 1) ? NT - 1 - jj : jj;
+                    mma16816(acc[i][j], fr.af[cb][i], fr.bf[cb][j][0], fr.bf[cb][j][1]);
+                }
+            if (ks == 0) cp_commit();
+        }
+        if (++s == S) s = 0;
+        if constexpr (FOLD != 0) {
+            if (++in_slice == kt_ch || kt == KT - 1) {
+#pragma unroll
+                for (int i = 0; i < MT; ++i)
+#pragma unroll
+                    for (int j = 0; j < NT; ++j)
+#pragma unroll
+                        for (int q = 0; q < 4; ++q) {
+                            tot[i][j][q] = combine<FOLD>(tot[i][j][q], acc[i][j][q], first);
+                            acc[i][j][q] = 0.f;
+                        }
+                first = false;
+                in_slice = 0;
+            }
+        }
+    }
+    cp_wait<0>();
+    __syncthreads();
+}
+
+
+}
+// NG9B: BK=64 two-stage cp.async bf16 GEMMs for sm_120 (RTX PRO 6000), C[M, N] = A[M, K] @ B[N, K]^T, plus the
+// gate|up GEMM with the SwiGLU epilogue. Same arithmetic as ngemm5.cu (byte-exact vs the unsplit cuBLASLt pins): fp32
+// accumulation over K in ascending k16 order through mma.sync m16n8k16, one RN round to bf16; SwiGLU = ngemm5's
+// swiglu1 (silu_f32 = x / (1 + expf(-x)) IEEE division, bf16 round, times u, bf16 round).
+// Why BK=64 / 2 stages (NG9B, Lium 2026-10-20): the 128x256 GEMMs run at the 600 W power cap in the paired 2-lane
+// regime (SM clock 2.20-2.33 GHz vs 2.43 GHz without global loads); cycles are within ~2-4 % of the no-load bound and
+// the CTA barrier costs ~0.25 % of cycles, so the lever is energy per byte moved: 128-byte row segments per k-tile (full
+// L2 lines, half the L2 requests of BK=32) raise the clock 1-3 % and the paired GEMM rate ~3 %.
+// Mainloop: cp.async ring (STAGES deep), XOR-swizzled smem + ldmatrix, fragments double-buffered across k-steps,
+// one __syncthreads per k-tile, the refill of tile kt+STAGES-1 issued as one block at k-step 0 of tile kt (ngemm5
+// timing), serpentine mma order (row i odd walks the n-tiles backwards; order of independent accumulators only).
+// Epilogues: plain = stmatrix.x4 staging + 16-byte stores; SwiGLU = register-direct with the B tile rows interleaved
+// per warp column (WTN/2 gate rows then the matching WTN/2 up rows), so each thread holds g and u of its own outputs.
+// Kernels (arg order = ngemm5 / ng.py: A, B, C, M, N, K, lda, ldc, chunk, mb, ws, flags; chunk / ws / flags unused):
+//   nh9_*: unsplit, rows [0, mb) big tiles (CTAs 0 .. Tb-1, m fastest), rows [mb, M) small tiles (as nh_*)
+//   nsw9_*: N = 2H stacked [Wg; Wu], out [M, H] (as nsw_*)
+// Needs N % BN == 0, K % BK == 0, 16-byte aligned rows. Small tiles may use BK=32 (their own swizzle / stages).
+#include <cuda_bf16.h>
+#include <stdint.h>
+
+#define DEVI __device__ __forceinline__
+
+namespace addressed_exact {
+
+DEVI uint32_t smem_u32(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
+DEVI void cp_async16(uint32_t dst, const void* src, bool pred) {
+    int sz = pred ? 16 : 0;
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(dst), "l"(src), "r"(sz));
+}
+DEVI void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
+template <int N>
+DEVI void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+DEVI void ldsm_x4(uint32_t addr, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(addr));
+}
+DEVI void mma16816(float* d, const uint32_t* a, uint32_t b0, uint32_t b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+                 "{%0,%1,%2,%3};\n"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+DEVI void named_sync(int id, int n) { asm volatile("bar.sync %0, %1;\n" ::"r"(id), "r"(n) : "memory"); }
+DEVI uint32_t pack_bf2(float a, float b) {
+    __nv_bfloat162 h = __floats2bfloat162_rn(a, b);
+    return *reinterpret_cast<uint32_t*>(&h);
+}
+DEVI float rbf(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
+// split-K fold of slice sums (cuBLASLt reduction schemes): 1 INPLACE, 2 COMPUTE_TYPE, 4 OUTPUT_TYPE
+template <int MODE>
+DEVI float combine(float total, float acc, bool first) {
+    if constexpr (MODE == 2) return first ? acc : total + acc;
+    else if constexpr (MODE == 1) return first ? rbf(acc) : rbf(total + acc);
+    else return first ? rbf(acc) : total + rbf(acc);
+}
+DEVI float silu_f32(float x) { return __fdiv_rn(x, 1.0f + expf(-x)); }
+DEVI __nv_bfloat16 swiglu1(__nv_bfloat16 g, __nv_bfloat16 u) {
+    float s = __bfloat162float(__float2bfloat16_rn(silu_f32(__bfloat162float(g))));
+    return __float2bfloat16_rn(s * __bfloat162float(u));
+}
+
+template <int BK>
+DEVI int swz_f(int r) {
+    if constexpr (BK == 32) return (r >> 1) & 3;
+    else return r & 7;
+}
+
+// EPI: 2 = plain stmatrix epilogue, 1 = SwiGLU register epilogue (interleaved B rows)
+template <int BM_, int BN_, int BK_, int WARPS_M, int WARPS_N, int STAGES_, int EPI_>
+struct Cfg {
+    static constexpr int BM = BM_, BN = BN_, BK = BK_, STAGES = STAGES_, WM = WARPS_M, WN = WARPS_N, EPI = EPI_;
+    static constexpr int CW = WARPS_M * WARPS_N;
+    static constexpr int THREADS = CW * 32;
+    static constexpr int WTM = BM / WARPS_M, WTN = BN / WARPS_N;
+    static constexpr int MT = WTM / 16, NT = WTN / 8, KS = BK / 16, CH = BK / 8;
+    static constexpr int A_STAGE = BM * BK, B_STAGE = BN * BK;
+    static constexpr int SMEM_PIPE = STAGES * (A_STAGE + B_STAGE) * 2;
+    static constexpr int CPAD = 8;
+    static constexpr int SMEM_EPI = BM * (BN + CPAD) * 2;
+    static constexpr int SMEM = SMEM_PIPE > SMEM_EPI ? SMEM_PIPE : SMEM_EPI;
+    static_assert(MT >= 1 && NT % 2 == 0 && KS % 2 == 0 && STAGES >= 2, "tile");
+};
+
+// per-thread chunk loader: chunk q < NA = A rows r0 + q RS, q >= NA = B rows r0 + (q - NA) RS (RS = threads / chunks
+// per row); global element offsets precomputed once
+template <class C>
+struct Loader {
+    static constexpr int RS = C::THREADS / C::CH;
+    static constexpr int NA = (C::BM + RS - 1) / RS;
+    static constexpr int NB = (C::BN + RS - 1) / RS;
+    static constexpr int NQ = NA + NB;
+    const __nv_bfloat16* pa;
+    const __nv_bfloat16* pb;
+    uint32_t offa[NA], offb[NB];
+    uint32_t dst0;
+    uint32_t amask;
+    int r0;
+    DEVI void init(const __nv_bfloat16* A, const __nv_bfloat16* B, int m0, int n0, int n1, int M, int K, int lda) {
+        const int tid = threadIdx.x;
+        r0 = tid / C::CH;
+        const int c = tid % C::CH;
+        dst0 = (r0 * C::BK + ((c ^ swz_f<C::BK>(r0)) * 8)) * 2;
+        pa = A;
+        pb = B;
+        amask = 0;
+#pragma unroll
+        for (int q = 0; q < NA; ++q) {
+            const int r = r0 + q * RS;
+            const int gm = m0 + r;
+            const bool ok = gm < M;
+            offa[q] = (uint32_t)((ok ? gm : 0) * lda + c * 8);
+            amask |= (ok ? 1u : 0u) << q;
+        }
+#pragma unroll
+        for (int q = 0; q < NB; ++q) {
+            const int r = r0 + q * RS;
+            int wr;
+            if (C::EPI == 1 && n1 >= 0) {   // warp column wn: gate rows wn*WTN/2.. then the matching up rows
+                const int wn = r / C::WTN, h = (r % C::WTN) >= C::WTN / 2, cc = r % (C::WTN / 2);
+                wr = (h ? n1 : n0) + wn * (C::WTN / 2) + cc;
+            } else {
+                wr = (n1 < 0 || r < C::BN / 2) ? n0 + r : n1 + r - C::BN / 2;
+            }
+            offb[q] = (uint32_t)(wr * K + c * 8);
+        }
+    }
+    DEVI void issue_all(uint32_t sA, uint32_t sB, int k0) {
+#pragma unroll
+        for (int q = 0; q < NQ; ++q) {
+            if (q < NA) {
+                if (C::BM % RS == 0 || r0 + q * RS < C::BM)
+                    cp_async16(sA + dst0 + q * RS * C::BK * 2, pa + offa[q] + k0, (amask >> q) & 1);
+            } else {
+                const int qb = q - NA;
+                if (C::BN % RS == 0 || r0 + qb * RS < C::BN)
+                    cp_async16(sB + dst0 + qb * RS * C::BK * 2, pb + offb[qb] + k0, true);
+            }
+        }
+    }
+};
+
+template <class C>
+struct Frag {
+    uint32_t a_off[C::KS], b_off[C::KS];
+    uint32_t af[2][C::MT][4];
+    uint32_t bf[2][C::NT][2];
+    DEVI void init(int wm, int wn, int lane) {
+        constexpr int BK = C::BK;
+        const int a_r = wm * C::WTM + (lane % 16);
+        const int a_f = swz_f<BK>(lane % 16);
+        const int a_kc = lane / 16;
+        const int b_r = wn * C::WTN + (lane / 16) * 8 + (lane % 8);
+        const int b_f = swz_f<BK>((lane / 16) * 8 + (lane % 8));
+        const int b_kc = (lane / 8) % 2;
+#pragma unroll
+        for (int ks = 0; ks < C::KS; ++ks) {
+            a_off[ks] = (a_r * BK + (((ks * 2 + a_kc) ^ a_f) * 8)) * 2;
+            b_off[ks] = (b_r * BK + (((ks * 2 + b_kc) ^ b_f) * 8)) * 2;
+        }
+    }
+    DEVI void load(int buf, uint32_t sA, uint32_t sB, int ks) {
+        const uint32_t a = sA + a_off[ks];
+        const uint32_t b = sB + b_off[ks];
+#pragma unroll
+        for (int i = 0; i < C::MT; ++i)
+            ldsm_x4(a + i * 16 * C::BK * 2, af[buf][i][0], af[buf][i][1], af[buf][i][2], af[buf][i][3]);
+#pragma unroll
+        for (int j = 0; j < C::NT; j += 2)
+            ldsm_x4(b + j * 8 * C::BK * 2, bf[buf][j][0], bf[buf][j][1], bf[buf][j + 1][0], bf[buf][j + 1][1]);
+    }
+};
+
+// acc = A[m0:m0+BM, :] @ B-tile^T over all of K, k ascending
+// FOLD != 0 (in-CTA split-K, ns9_*): every `chunk` columns of K (slice boundaries, multiples of 64) acc is folded into
+// tot by the pin's reduction scheme and restarted; otherwise acc holds the plain sum
+template <class C, int FOLD = 0, bool ADD = false>
+DEVI void mainloop(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B, int M, int K, int lda,
+                   int m0, int n0, int n1, __nv_bfloat16* smem, float (&acc)[C::MT][C::NT][4],
+                   float (*tot)[C::NT][4] = nullptr, int chunk = 0) {
+    constexpr int KS = C::KS, BK = C::BK, S = C::STAGES, MT = C::MT, NT = C::NT;
+    const uint32_t sA0 = smem_u32(smem);
+    const uint32_t sB0 = sA0 + S * C::A_STAGE * 2;
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const int KT = K / BK;
+    auto sa = [&](int s) { return sA0 + s * C::A_STAGE * 2; };
+    auto sb = [&](int s) { return sB0 + s * C::B_STAGE * 2; };
+    if constexpr (!ADD) {
+#pragma unroll
+    for (int i = 0; i < MT; ++i)
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+    }
+    Loader<C> ld;
+    ld.init(A, B, m0, n0, n1, M, K, lda);
+#pragma unroll
+    for (int t = 0; t < S - 1; ++t) {
+        if (t < KT) ld.issue_all(sa(t), sb(t), t * BK);
+        cp_commit();
+    }
+    Frag<C> fr;
+    fr.init(warp / C::WN, warp % C::WN, lane);
+    cp_wait<S - 2>();
+    __syncthreads();
+    fr.load(0, sa(0), sb(0), 0);
+    int s = 0;   // slot of tile kt
+    const int kt_ch = FOLD ? chunk / BK : KT;
+    int in_slice = 0;
+    bool first = true;
+    for (int kt = 0; kt < KT; ++kt) {
+#pragma unroll
+        for (int ks = 0; ks < KS; ++ks) {
+            if (ks == KS - 1) {
+                cp_wait<S - 2>();
+                __syncthreads();
+            }
+            if (ks == 0) {   // refill the slot tile kt-1 used (free since the barrier of its last k-step)
+                const int tt = kt + S - 1;
+                if (tt < KT) ld.issue_all(sa(tt % S), sb(tt % S), tt * BK);
+            }
+            if (ks < KS - 1 || kt + 1 < KT) {
+                const int ns = ks < KS - 1 ? s : (s + 1 == S ? 0 : s + 1);
+                fr.load((ks + 1) & 1, sa(ns), sb(ns), ks < KS - 1 ? ks + 1 : 0);
+            }
+            const int cb = ks & 1;
+#pragma unroll
+            for (int i = 0; i < MT; ++i)
+#pragma unroll
+                for (int jj = 0; jj < NT; ++jj) {
+                    const int j = (i & 1) ? NT - 1 - jj : jj;
+                    mma16816(acc[i][j], fr.af[cb][i], fr.bf[cb][j][0], fr.bf[cb][j][1]);
+                }
+            if (ks == 0) cp_commit();
+        }
+        if (++s == S) s = 0;
+        if constexpr (FOLD != 0) {
+            if (++in_slice == kt_ch || kt == KT - 1) {
+#pragma unroll
+                for (int i = 0; i < MT; ++i)
+#pragma unroll
+                    for (int j = 0; j < NT; ++j)
+#pragma unroll
+                        for (int q = 0; q < 4; ++q) {
+                            tot[i][j][q] = combine<FOLD>(tot[i][j][q], acc[i][j][q], first);
+                            acc[i][j][q] = 0.f;
+                        }
+                first = false;
+                in_slice = 0;
+            }
+        }
+    }
+    cp_wait<0>();
+    __syncthreads();
+}
+
+
+}

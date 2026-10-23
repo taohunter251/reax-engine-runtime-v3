@@ -1,0 +1,4 @@
+{
+  "parent": "Public UID56 MIT NG9B arithmetic via localfoldr2",
+  "change": "Specialize N2048K2560 attention KV projection for actual row cohorts and188SM host: CTA sizes96/112/160/192/224,6/10/12/14/16warps to reduce underfilled second waves. Same per-slice BF16round/FP32fold, no example-specific behavior."
+}

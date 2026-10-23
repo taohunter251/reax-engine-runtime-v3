@@ -1,0 +1,969 @@
+diff -ruN a/s1eng/KERNELS.md b/s1eng/KERNELS.md
+--- a/s1eng/KERNELS.md	1970-01-01 00:00:00.000000000 +0000
++++ b/s1eng/KERNELS.md	2026-10-21 21:02:26.702018911 +0000
+@@ -0,0 +1,20 @@
++# Our compiled kernels in this directory: sources and exact build lines (ruj)
++
++Every cubin of ours that this image ships sits next to its CUDA source. Each one rebuilds **byte for byte** from that
++source with nvcc 13.4 (`Cuda compilation tools, release 13.4, V13.4.92`, `Build cuda_13.4.r13.4/compiler.38855100_0`),
++run in this directory:
++
++| cubin | source | build line | md5 of the cubin | used by |
++|---|---|---|---|---|
++| `skx6.cubin` | `skx6.cu` | `nvcc -arch=sm_120a -O3 -cubin -Xptxas -v -o skx6.cubin skx6.cu` | `55a57eae00610aee283cefdccf6ccb08` | `mx.py` (MX two-class GEMM of the mixed 128 -> 192 graphs) |
++| `skx6t.cubin` | `skx6t.cu` | `nvcc -arch=sm_120a -O3 -cubin -Xptxas -v -o skx6t.cubin skx6t.cu` | `23ef7c9cd4485022635a2440a5f5093d` | `mx.py` with `S1ENG_SKX6T` (skx6 without its padded tail work) |
++| `kf.cubin` | `kf.cu` | `nvcc -O3 -arch=sm_120a -cubin -Xptxas -v -o kf.cubin kf.cu` | `c539fe299fca6eafc2251051a8f0d5a2` | `kf.py` (KF in-CTA split-K GEMM) |
++| `rn.cubin` | `rn.cu` | `nvcc -cubin -arch=sm_120a -O3 -fmad=false -Xptxas -v -o rn.cubin rn.cu` | `2e188b083929bbf17d0b047ec6f6c14a` | `rn.py` (RN norms; off in this image: `S1ENG_RN=0`) |
++
++* `-Xptxas -v` only prints the register use, but ptxas writes its own command line into the cubin's
++  `.note.nv.tkinfo` section. Without the flag the machine code is the same (`cuobjdump -sass` identical) and the
++  note differs, so the md5 differs. The older build notes (the `rn.cu` header, the kf lever notes) omit the flag.
++* Check: `md5sum *.cubin` after the build lines above, or compare `cuobjdump -sass` output.
++* The other cubins in this directory are not ours (rgh / kai): `ngemm5*`, `ngemm9*`, `ngr`, `ffs`, `kkt2n`, `onorm`,
++  `pron`, `xa`. `ngemm5.cubin` rebuilds from `ngemm5.cu` with `nvcc -arch=sm_120a -O3 -cubin -o ngemm5.cubin ngemm5.cu`
++  (md5 `4e6e162613b9e0261968bf7f8fb41402`).
+diff -ruN a/s1eng/batchfwd.py b/s1eng/batchfwd.py
+--- a/s1eng/batchfwd.py	2026-10-21 21:02:26.700720862 +0000
++++ b/s1eng/batchfwd.py	2026-10-21 21:02:26.705783553 +0000
+@@ -739,6 +739,42 @@
+         self.mxp[(D, S)] = mp
+         return ""
+ 
++    @torch.inference_mode()
++    def mx_tail_gate(self, D: int, S: int, weights: dict, fused: list, rs: list, seed: int = 303):
++        """skx6t (ruj): start-up byte gate of the tail-skip two-class kernel (mx.tail_mode()) for the pair (D, S): every
++        two-class shape of mx_setup (and the fused blocks it checked) at every R of the pair's mixed graphs, the
++        variant against skx6 itself (mx.tail_check: all rows, all bits, M1 at every residue mod 16 / tile edges / both
++        ends, two inputs). A key that passes runs the variant (mx.TAIL), any other key keeps skx6.
++        -> (keys passed, keys rejected, variant) or None (switch off / no pair)"""
++        from . import mx
++
++        v = mx.tail_mode()
++        mp = self.mxp.get((D, S))
++        if not v or mp is None or mx.lib() is None:
++            return None
++        g = torch.Generator(device="cuda")
++        g.manual_seed(seed + D + S)
++        checks = [(N, K, W, mp.cls[(N, K)]) for (N, K), W in sorted(weights.items(), key=lambda kv: kv[0])
++                  if (N, K) in mp.cls]
++        for blk, n1 in fused:   # pair(): a fused block whose parts share both classes runs as one two-class launch
++            c1 = mp.cls.get((n1, blk.shape[1]))
++            if c1 is not None and blk.shape[0] == 2 * n1:
++                checks.append((blk.shape[0], blk.shape[1], blk, c1))
++        ok, bad = 0, []
++        for N, K, W, c in checks:
++            for R in sorted(set(rs)):
++                name = mx.kernel_for(N, K, R)
++                if (name, N, K, R) in mx.TAIL:
++                    continue
++                nd = mx.tail_check(name, W, c[0], c[1], R, v, g)
++                if nd == 0:
++                    mx.TAIL[(name, N, K, R)] = mx.tail_name(name, v)
++                    ok += 1
++                else:
++                    bad.append(f"{N}x{K}@R{R} ({nd})")
++        torch.cuda.synchronize()
++        return ok, bad, v
++
+     def mx_stack_l0t(self) -> int:
+         """MX: every bucket's L0T table rows moved into one arena (the books' tensors become row views of it, contents
+         copied: inserts, gathers and the host maps are unchanged) -> {L: row offset of its book}; a mixed graph stages
+diff -ruN a/s1eng/fcab.py b/s1eng/fcab.py
+--- a/s1eng/fcab.py	2026-10-21 21:02:26.698251635 +0000
++++ b/s1eng/fcab.py	2026-10-21 21:02:26.703396140 +0000
+@@ -25,6 +25,8 @@
+   nomx        own-final: no extra lane set (the env set); MX's join is switched by the S1ENG_ARMS arm of the same name
+   nokf        KF (ruj gemm2/k2): this set without KF = the base picks + the base RARN / SKR selections (S1+KF: with
+               its own MX mixed graphs, so S1's joins run in it as in the env set)
++  noskt       skx6t: this set's MX mixed graphs run skx6 itself, not the tail-skip variant (S1ENG_SKX6T=0 while the
++              set is captured)
+ """
+ from __future__ import annotations
+ 
+@@ -54,7 +56,7 @@
+             off |= set(LEVERS) - {"rn", "rng", "skr", "grp", "late_r"}
+         elif t.startswith("no") and t[2:] in LEVERS:
+             off.add(t[2:])
+-        elif t not in ("copy", "nolean", "noonorm", "nomsd", "nomx", "nokf") and not t.startswith(("bacfg=", "tgcfg=", "tgscfg=", "rnk=", "rngh=")):
++        elif t not in ("copy", "nolean", "noonorm", "nomsd", "nomx", "nokf", "noskt") and not t.startswith(("bacfg=", "tgcfg=", "tgscfg=", "rnk=", "rngh=")):
+             raise ValueError(f"unknown FCAB toggle {t!r}")
+     return frozenset(off)
+ 
+@@ -69,6 +71,9 @@
+         if t == "nomsd":              # r2 fixedcost2: MSD (lane 1 in the REMOTE memory sync domain) off in this set
+             ov["S1ENG_MSD"] = "0"
+             continue
++        if t == "noskt":              # skx6t: the set's mixed graphs capture skx6 itself (mx.run reads the switch)
++            ov["S1ENG_SKX6T"] = "0"
++            continue
+         if t.startswith("rnk="):     # r2 hotspot RN: kernel kind of this set (S1ENG_RN_KIND)
+             ov["S1ENG_RN_KIND"] = t[4:]
+             continue
+diff -ruN a/s1eng/model.py b/s1eng/model.py
+--- a/s1eng/model.py	2026-10-21 21:02:26.699282180 +0000
++++ b/s1eng/model.py	2026-10-21 21:02:26.704337841 +0000
+@@ -1478,6 +1478,23 @@
+                 notes.append(f"{S_}->{D_}: {why}")
+                 continue
+             mixrows[(D_, S_)] = mix_rows(D_, S_, prow[D_], pfx_of.get(D_, 0), mix_slots(D_, S_, pack[D_]))
++            # skx6t (ruj): the two-class GEMM without its padded tail work (S1ENG_SKX6T), byte-gated per (N, K, R) of
++            # these mixed graphs against skx6 itself before they are captured; rejected keys keep skx6
++            from . import mx as _mxm
++
++            if _mxm.tail_mode():
++                t2 = time.time()
++                try:
++                    tg = pf.mx_tail_gate(D_, S_, shapes, fz_list,
++                                         sorted({r for rs_ in mixrows[(D_, S_)].values() for r in rs_}))
++                except Exception as exc:  # noqa: BLE001 - the lever must never take MX down with it
++                    _mxm.TAIL.clear()
++                    tg = None
++                    notes.append(f"skx6t {S_}->{D_}: {type(exc).__name__}: {exc}")
++                if tg is not None:
++                    log(f"lever used: skx6t (S1ENG_SKX6T, variant {tg[2]}) at {tg[0]} (N, K, R) keys of the {S_}->{D_} "
++                        f"mixed graphs, bit-equal to skx6 at start-up in {time.time() - t2:.1f}s; {len(tg[1])} "
++                        f"rejected (they keep skx6){': ' + ', '.join(tg[1][:8]) if tg[1] else ''}")
+         bf.ws = None
+         torch.cuda.synchronize()
+         torch.cuda.empty_cache()
+diff -ruN a/s1eng/mx.py b/s1eng/mx.py
+--- a/s1eng/mx.py	2026-10-21 21:02:26.700812019 +0000
++++ b/s1eng/mx.py	2026-10-21 21:02:26.702069397 +0000
+@@ -21,6 +21,15 @@
+ 
+ _DIR = os.path.dirname(os.path.abspath(__file__))
+ CUBIN = os.path.join(_DIR, os.environ.get("MX_CUBIN", "skx6.cubin"))
++# skx6t (ruj skx6t track): the same two-class GEMM without the padded tail work (skx6t.cu / skx6t.cubin): "t" =
++# skx6's segment grids with the m16 row sub-tiles past a segment's end skipped, "m" = one tile grid over [0, M) whose
++# boundary tile folds every row at its own class's slice ends. Switch S1ENG_SKX6T ("" / "0" = skx6 only, as before;
++# "1" = DEFAULT_TAIL; "t" / "m"); a variant runs only at the (kernel, N, K, M) keys that tail_gate found byte-equal to
++# skx6 at start-up (TAIL), every other launch stays skx6.
++TCUBIN = os.path.join(_DIR, os.environ.get("MX_TCUBIN", "skx6t.cubin"))
++TVARIANTS = {"t": "gemm_skx6t_", "m": "gemm_skx6m_"}
++DEFAULT_TAIL = "t"
++TAIL = {}   # (skx6 kernel name, N, K, M) -> variant kernel name
+ # name: (BM, BN, BK, stages, threads)
+ KERNELS = {
+     "gemm_skx6_128x128k64": (128, 128, 64, 3, 256),
+@@ -53,6 +62,21 @@
+             self.fn[name] = (f, smem)
+         if not self.fn:
+             raise RuntimeError("MX: no kernels in " + CUBIN)
++        self.tfn = {}   # skx6t variants, loaded only with the switch on (off: skx6.cubin alone, as before)
++        if tail_mode() and os.path.exists(TCUBIN):
++            tdata = open(TCUBIN, "rb").read()
++            self._timg = C.create_string_buffer(tdata, len(tdata))
++            self.tmod = C.c_void_p()
++            self._chk(self.cu.cuModuleLoadData(C.byref(self.tmod), self._timg), "cuModuleLoadData skx6t")
++            for name, (bm, bn, bk, st, th) in KERNELS.items():
++                for pre in TVARIANTS.values():
++                    tname = pre + name[len("gemm_skx6_"):]
++                    f = C.c_void_p()
++                    if self.cu.cuModuleGetFunction(C.byref(f), self.tmod, tname.encode()) != 0:
++                        continue
++                    smem = _smem(bm, bn, bk, st)
++                    self._chk(self.cu.cuFuncSetAttribute(f, 8, smem), "smem attribute")
++                    self.tfn[tname] = (f, smem)
+ 
+     @staticmethod
+     def _chk(r, what):
+@@ -99,18 +123,92 @@
+     L = lib()
+     if L is None or not supported(name, x, W, out, c1, c2):
+         raise RuntimeError("MX GEMM: unavailable or unsupported layout")
+-    bm, bn, bk, st, th = KERNELS[name]
+-    f, smem = L.fn[name]
++    M, K = x.shape
++    N = W.shape[0]
++    tv = TAIL.get((name, N, K, M)) if TAIL and tail_mode() else None   # skx6t: a gated key (read at capture time)
++    _launch(L, tv if tv is not None and tv in L.tfn else name, W, x, out, c1, c2, m1, m1s)
++    return out
++
++
++def _launch(L, kname, W, x, out, c1, c2, m1=None, m1s: int = 0, stream=None) -> None:
++    """one launch of an skx6 kernel or an skx6t variant (gemm_skx6m_*: one grid over [0, M), no spare row tile)"""
++    base = kname if kname in KERNELS else "gemm_skx6_" + kname.split("_", 2)[2]
++    bm, bn, bk, st, th = KERNELS[base]
++    f, smem = L.fn[kname] if kname in L.fn else L.tfn[kname]
+     M, K = x.shape
+     N = W.shape[0]
+     args = [C.c_void_p(x.data_ptr()), C.c_void_p(W.data_ptr()), C.c_void_p(out.data_ptr()), C.c_int(M), C.c_int(N),
+             C.c_int(K), C.c_int(x.stride(0)), C.c_int(out.stride(0)), C.c_int(int(c1)), C.c_int(int(c2)),
+             C.c_void_p(m1.data_ptr() if m1 is not None else 0), C.c_int(int(m1s))]
+     params = (C.c_void_p * len(args))(*[C.cast(C.pointer(a), C.c_void_p) for a in args])
+-    gx, gy = N // bn, -(-M // bm) + 1
+-    L._chk(L.cu.cuLaunchKernel(f, gx, gy, 1, th, 1, 1, smem, C.c_void_p(torch.cuda.current_stream().cuda_stream),
+-                               params, None), "launch")
+-    return out
++    gx, gy = N // bn, -(-M // bm) + (0 if kname.startswith(TVARIANTS["m"]) else 1)
++    h = (stream or torch.cuda.current_stream()).cuda_stream
++    L._chk(L.cu.cuLaunchKernel(f, gx, gy, 1, th, 1, 1, smem, C.c_void_p(h), params, None), "launch")
++
++
++def tail_mode() -> str:
++    """skx6t switch S1ENG_SKX6T: "" (also unset, "0") = skx6 only; "1" = DEFAULT_TAIL; "t" / "m" = that variant"""
++    v = os.environ.get("S1ENG_SKX6T", "0").strip().lower()
++    if v in ("", "0"):
++        return ""
++    v = DEFAULT_TAIL if v == "1" else v
++    return v if v in TVARIANTS else ""
++
++
++def tail_name(name: str, variant: str) -> str:
++    return TVARIANTS[variant] + name[len("gemm_skx6_"):]
++
++
++@torch.inference_mode()
++def tail_check(name: str, W: torch.Tensor, c1: int, c2: int, R: int, variant: str, g) -> int:
++    """skx6t start-up byte gate of one (kernel, N, K, M = R) key: the variant vs skx6 itself, every one of the R output
++    rows in all bits, for M1 at one value in every 16-row block (residue 7 q mod 16: all residues mod 16 occur), around
++    every tile edge, at 0 / 1 / R - 1 / R, on two inputs (randn with every 7th row x64; rows at 2^U(-12, 12) with every
++    5th row x4096 and sparse +-1e4 spikes; the second input at every 4th M1). Reference row = skx6 in the row's own class
++    (skx6 at M1 = R and at M1 = 0: a row's bits depend on its class only; checked by running skx6 itself at every 11th
++    M1). 128 sentinel rows after R must stay untouched. -> number of differing values (0 = byte-equal), -1 = unavailable"""
++    L = lib()
++    tv = tail_name(name, variant)
++    if L is None or tv not in L.tfn or not supported(name, torch.empty((1, W.shape[1]), dtype=torch.bfloat16,
++                                                                          device="cuda"), W,
++                                                     torch.empty((1, W.shape[0]), dtype=torch.bfloat16, device="cuda"),
++                                                     c1, c2):
++        return -1
++    N, K = W.shape
++    bm = KERNELS[name][0]
++    ms = {0, 1, R - 1, R} | {min(R, 16 * q + (7 * q) % 16) for q in range(R // 16 + 1)}
++    ms |= {b + d for b in range(0, R + 1, bm) for d in (-1, 0, 1) if 0 <= b + d <= R}
++    ms = sorted(m for m in ms if 0 <= m <= R)
++    sent = -21555
++    bad = torch.zeros((), dtype=torch.long, device="cuda")
++    out = torch.empty((R + 128, N), dtype=torch.bfloat16, device="cuda")
++    for kind in (0, 1):
++        if kind == 0:
++            x = torch.randn((R, K), generator=g, device="cuda")
++            x[::7] *= 64
++        else:
++            e = torch.randint(-12, 13, (R, 1), generator=g, device="cuda").float()
++            x = torch.randn((R, K), generator=g, device="cuda") * torch.exp2(e)
++            x[::5] *= 4096
++            sp = torch.rand((R, K), generator=g, device="cuda") < 1e-3
++            x = torch.where(sp, torch.sign(torch.randn((R, K), generator=g, device="cuda")) * 1e4, x)
++        x = x.to(torch.bfloat16).contiguous()
++        refs = []
++        for mv in (R, 0):
++            o = torch.empty((R, N), dtype=torch.bfloat16, device="cuda")
++            _launch(L, name, W, x, o, c1, c2, torch.tensor([mv], dtype=torch.int32, device="cuda"))
++            refs.append(o.view(torch.int16))
++        mk = ms if kind == 0 else ms[::4]
++        m1all = torch.tensor(mk, dtype=torch.int32, device="cuda")
++        for i, mv in enumerate(mk):
++            ref = torch.cat([refs[0][:mv], refs[1][mv:]])
++            for kn in ((tv, name) if i % 11 == 0 else (tv,)):
++                out.view(torch.int16).fill_(sent)
++                _launch(L, kn, W, x, out, c1, c2, m1all[i:i + 1])
++                ov = out.view(torch.int16)
++                bad += (ov[:R] != ref).sum() + (ov[R:] != sent).sum()
++    torch.cuda.synchronize()
++    return int(bad)
+ 
+ 
+ def kernel_for(N: int, K: int, R: int) -> str:
+diff -ruN a/s1eng/skx6.cu b/s1eng/skx6.cu
+--- a/s1eng/skx6.cu	1970-01-01 00:00:00.000000000 +0000
++++ b/s1eng/skx6.cu	2026-10-21 21:02:26.706711433 +0000
+@@ -0,0 +1,279 @@
++// SKX6 (ruj r2 mixbatch, 2026-10-21): EXACT two-class GEMM for cross-bucket ("mixed") batches, one CTA per output
++// tile with the K slices folded in registers, the segment boundary read from DEVICE memory (so one captured CUDA graph
++// serves every split of its rows between the two buckets).
++//   C[M, N] = A[M, K] @ B[N, K]^T, A = activations (lda), B = weight [N, K] (ld K), C bf16 (ldc).
++// Rows [0, M1) are computed in class 1 (K slices of chunk1 columns), rows [M1, M) in class 2 (chunk2); chunk = K is
++// the unsplit class. M1 = *m1p (int32 on the device, clamped to [0, M]); m1p == nullptr -> M1 = m1s.
++// Arithmetic of a class = the pin's bit class, as SKX5 (n2560 track, mc_test exact on every JOIN shape) and rgh's
++// ns9 / RARN nsq9 in-CTA split: S = ceil(K / chunk) slices, the last one the rest; each slice is one ascending-k chain
++// of mma.sync m16n8k16 (fp32) from +0 over its k16 steps, rounded once to bf16; the slices are folded in slice order
++// with fp32 RN adds starting from the first partial itself (tot = f(b(acc_0)); tot = tot + f(b(acc_s))), rounded once:
++// scheme 4 (OUTPUT_TYPE). S = 1: bf16(acc_0).
++// Schedule: grid (N / BN, ceil(M / BM) + 1). Row tile t < mt1 = ceil(M1 / BM) covers rows [t BM, min(t BM + BM, M1));
++// the others cover segment 2 from row M1 on; tiles past both segments exit at once. Each CTA runs its tile's whole K
++// through one continuous cp.async pipeline (SKX3's branch-free hot loop; loads checked only in the last ST k-tiles)
++// and folds a slice's chain into the fp32 total in registers at every slice end (no partial buffers, no tickets).
++// Needs N % BN == 0, K % BK == 0, chunk % BK == 0, 16-byte aligned rows.
++#include <cuda_bf16.h>
++#include <stdint.h>
++
++#include <type_traits>
++
++#define DEVI __device__ __forceinline__
++
++DEVI uint32_t smem_u32(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
++DEVI void cp16(uint32_t dst, const void* src, uint32_t sz) {
++    asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16, %2;\n" ::"r"(dst), "l"(src), "r"(sz));
++}
++DEVI void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
++template <int N>
++DEVI void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
++DEVI void ldsm_x4(uint32_t addr, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) {
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(addr));
++}
++DEVI void mma16816(float* d, const uint32_t* a, uint32_t b0, uint32_t b1) {
++    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
++                 "{%0,%1,%2,%3};\n"
++                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
++                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
++}
++DEVI uint32_t pack_bf2(float a, float b) {
++    __nv_bfloat162 v = __floats2bfloat162_rn(a, b);
++    return *reinterpret_cast<uint32_t*>(&v);
++}
++DEVI float bf_round(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
++
++template <int BK>
++DEVI int swz_f(int r) {
++    if constexpr (BK == 32) return (r >> 1) & 3;
++    else return r & 7;
++}
++
++template <int BM_, int BN_, int BK_, int WM_, int WN_, int ST_>
++struct Cfg {
++    static constexpr int BM = BM_, BN = BN_, BK = BK_, WM = WM_, WN = WN_, ST = ST_;
++    static constexpr int T = WM * WN * 32;
++    static constexpr int WTM = BM / WM, WTN = BN / WN;
++    static constexpr int MT = WTM / 16, NT = WTN / 8, KS = BK / 16, CH = BK / 8;
++    static constexpr int A_ST = BM * BK, B_ST = BN * BK;   // bf16 elements per stage
++    static constexpr int AI = BM * CH / T, BI = BN * CH / T;   // 16-byte chunks per thread per stage
++    static constexpr int RS = T / CH;                         // row step between one thread's chunks
++    static constexpr int SMEM = ST * (A_ST + B_ST) * 2;
++    static constexpr int E = MT * NT * 4;    // fp32 accumulators per thread
++    static_assert(MT >= 1 && NT % 2 == 0 && KS % 2 == 0, "tile");
++    static_assert((BM * CH) % T == 0 && (BN * CH) % T == 0 && RS % 8 == 0, "loader");
++};
++
++template <class C>
++DEVI void skx6(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B, __nv_bfloat16* __restrict__ Cm,
++               int M, int N, int K, int lda, int ldc, int chunk1, int chunk2, const int* __restrict__ m1p, int m1s,
++               unsigned char* smem_raw) {
++    constexpr int BM = C::BM, BN = C::BN, BK = C::BK, ST = C::ST, MT = C::MT, NT = C::NT, KS = C::KS;
++    const int tid = threadIdx.x;
++    int M1 = m1p != nullptr ? __ldg(m1p) : m1s;
++    M1 = M1 < 0 ? 0 : (M1 > M ? M : M1);
++    const int mt1 = (M1 + BM - 1) / BM, mt2 = (M - M1 + BM - 1) / BM;
++    const int t = blockIdx.y;
++    int m0, mend, chunk;
++    if (t < mt1) {
++        m0 = t * BM; mend = M1; chunk = chunk1;
++    } else if (t - mt1 < mt2) {
++        m0 = M1 + (t - mt1) * BM; mend = M; chunk = chunk2;
++    } else {
++        return;   // past both segments (the grid has one spare row tile for a boundary inside a tile)
++    }
++    const int n0 = blockIdx.x * BN;
++    const int KT = K / BK;
++    const int KC = chunk / BK;
++    const int S = (KT + KC - 1) / KC;
++
++    // ---- loader: thread's chunk column and first row; its rows are r0 + c * RS
++    const uint32_t sA0 = smem_u32(smem_raw);
++    const uint32_t sB0 = sA0 + ST * C::A_ST * 2;
++    const int lr0 = tid / C::CH, lcc = tid % C::CH;
++    const uint32_t lso = (lr0 * BK + ((lcc ^ swz_f<BK>(lr0)) * 8)) * 2;   // + c * RS * BK * 2 per chunk
++    const __nv_bfloat16* pa[C::AI];
++    const __nv_bfloat16* pb[C::BI];
++    uint32_t asz[C::AI];
++#pragma unroll
++    for (int c = 0; c < C::AI; ++c) {
++        const int gm = m0 + lr0 + c * C::RS;
++        asz[c] = gm < mend ? 16u : 0u;
++        pa[c] = A + (size_t)(gm < mend ? gm : mend - 1) * lda + lcc * 8;
++    }
++#pragma unroll
++    for (int c = 0; c < C::BI; ++c) pb[c] = B + (size_t)(n0 + lr0 + c * C::RS) * K + lcc * 8;
++    int lrem = KT;   // k-tiles still to load
++    auto issue_a = [&](int st) {
++        const uint32_t a = sA0 + st * C::A_ST * 2 + lso;
++#pragma unroll
++        for (int c = 0; c < C::AI; ++c) cp16(a + c * C::RS * BK * 2, pa[c], asz[c]);
++#pragma unroll
++        for (int c = 0; c < C::AI; ++c) pa[c] += BK;
++    };
++    auto issue_b = [&](int st) {
++        const uint32_t b = sB0 + st * C::B_ST * 2 + lso;
++#pragma unroll
++        for (int c = 0; c < C::BI; ++c) cp16(b + c * C::RS * BK * 2, pb[c], 16u);
++#pragma unroll
++        for (int c = 0; c < C::BI; ++c) pb[c] += BK;
++    };
++
++    // ---- fragments
++    const int warp = tid / 32, lane = tid % 32;
++    const int wm = warp / C::WN, wn = warp % C::WN;
++    const int a_r = wm * C::WTM + (lane % 16);
++    const int a_f = swz_f<BK>(lane % 16);
++    const int a_kc = lane / 16;
++    const int b_r = wn * C::WTN + (lane / 16) * 8 + (lane % 8);
++    const int b_f = swz_f<BK>((lane / 16) * 8 + (lane % 8));
++    const int b_kc = (lane / 8) % 2;
++    uint32_t a_off[KS], b_off[KS];
++#pragma unroll
++    for (int ks = 0; ks < KS; ++ks) {
++        a_off[ks] = (a_r * BK + (((ks * 2 + a_kc) ^ a_f) * 8)) * 2;
++        b_off[ks] = (b_r * BK + (((ks * 2 + b_kc) ^ b_f) * 8)) * 2;
++    }
++    uint32_t af[2][MT][4];
++    uint32_t bfr[2][NT][2];
++    auto load_frags = [&](int buf, int stage, int ks) {
++        const uint32_t a = sA0 + stage * C::A_ST * 2 + a_off[ks];
++        const uint32_t b = sB0 + stage * C::B_ST * 2 + b_off[ks];
++#pragma unroll
++        for (int i = 0; i < MT; ++i)
++            ldsm_x4(a + i * 16 * BK * 2, af[buf][i][0], af[buf][i][1], af[buf][i][2], af[buf][i][3]);
++#pragma unroll
++        for (int j = 0; j < NT; j += 2)
++            ldsm_x4(b + j * 8 * BK * 2, bfr[buf][j][0], bfr[buf][j][1], bfr[buf][j + 1][0], bfr[buf][j + 1][1]);
++    };
++
++    // ---- prologue: ST - 1 k-tiles in flight
++#pragma unroll
++    for (int s = 0; s < ST - 1; ++s) {
++        if (lrem > 0) {
++            issue_a(s);
++            issue_b(s);
++            --lrem;
++        }
++        cp_commit();
++    }
++    cp_wait<ST - 2>();
++    __syncthreads();
++    load_frags(0, 0, 0);
++    int cst = 0, lst = ST - 1;   // compute stage, load stage
++
++    float acc[MT][NT][4];
++    float tot[C::E];
++#pragma unroll
++    for (int i = 0; i < MT; ++i)
++#pragma unroll
++        for (int j = 0; j < NT; ++j)
++#pragma unroll
++            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
++
++    // one k-tile: MMAs of k-step ks, then this k-tile's share of the loads ST - 1 k-tiles ahead (A after step 0, B after
++    // step 1, committed before the wait of the last step); FAST: a load is due (no check)
++    auto ktile = [&](auto fast) {
++        constexpr bool FAST = decltype(fast)::value;
++        const int nst = cst + 1 == ST ? 0 : cst + 1;
++        const bool ld = FAST || lrem > 0;
++#pragma unroll
++        for (int ks = 0; ks < KS; ++ks) {
++            if (ks == KS - 1) {
++                cp_wait<ST - 2>();
++                __syncthreads();
++            }
++            if (ks < KS - 1) load_frags((ks + 1) & 1, cst, ks + 1);
++            else load_frags(0, nst, 0);
++#pragma unroll
++            for (int i = 0; i < MT; ++i)
++#pragma unroll
++                for (int jj = 0; jj < NT; ++jj) {
++                    const int j = (i & 1) ? NT - 1 - jj : jj;   // serpentine: B operand reuse
++                    mma16816(acc[i][j], af[ks & 1][i], bfr[ks & 1][j][0], bfr[ks & 1][j][1]);
++                }
++            if (ks == 0 && ld) issue_a(lst);
++            if (ks == (KS > 2 ? 1 : 0)) {
++                if (ld) {
++                    issue_b(lst);
++                    --lrem;
++                }
++                cp_commit();
++                lst = lst + 1 == ST ? 0 : lst + 1;
++            }
++        }
++        cst = nst;
++    };
++    // k-tiles [k0, k1): FAST while the load ST - 1 ahead is surely inside K
++    auto run_range = [&](int k0, int k1) {
++        const int f = min(k1, KT - ST);
++        int k = k0;
++        for (; k < f; ++k) ktile(std::true_type{});
++        for (; k < k1; ++k) ktile(std::false_type{});
++    };
++
++    const int g = lane / 4, t4 = lane % 4;
++    auto store_c = [&](const float* v) {
++#pragma unroll
++        for (int i = 0; i < MT; ++i)
++#pragma unroll
++            for (int j = 0; j < NT; ++j) {
++                const int r = m0 + wm * C::WTM + i * 16 + g;
++                const int c = n0 + wn * C::WTN + j * 8 + t4 * 2;
++                const float* q = v + (i * NT + j) * 4;
++                if (r < mend) *reinterpret_cast<uint32_t*>(Cm + (size_t)r * ldc + c) = pack_bf2(q[0], q[1]);
++                if (r + 8 < mend) *reinterpret_cast<uint32_t*>(Cm + (size_t)(r + 8) * ldc + c) = pack_bf2(q[2], q[3]);
++            }
++    };
++
++    if (S <= 1) {
++        run_range(0, KT);
++        cp_wait<0>();
++        store_c(&acc[0][0][0]);
++        return;
++    }
++    for (int s = 0; s < S; ++s) {
++        const int k0 = s * KC;
++        const int k1 = s + 1 < S ? k0 + KC : KT;
++        if (s > 0) {
++#pragma unroll
++            for (int i = 0; i < MT; ++i)
++#pragma unroll
++                for (int j = 0; j < NT; ++j)
++#pragma unroll
++                    for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
++        }
++        run_range(k0, k1);
++        const float* a = &acc[0][0][0];
++        if (s == 0) {
++#pragma unroll
++            for (int e = 0; e < C::E; ++e) tot[e] = bf_round(a[e]);
++        } else {
++#pragma unroll
++            for (int e = 0; e < C::E; ++e) tot[e] = tot[e] + bf_round(a[e]);
++        }
++    }
++    cp_wait<0>();
++    store_c(tot);
++}
++
++#define SKX6(NAME, CF)                                                                                             \
++    extern "C" __global__ void __launch_bounds__(CF::T, 1)                                                         \
++        NAME(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B, __nv_bfloat16* __restrict__ Cm, \
++             int M, int N, int K, int lda, int ldc, int chunk1, int chunk2, const int* __restrict__ m1p, int m1s) { \
++        extern __shared__ __align__(128) unsigned char smem_raw[];                                                  \
++        skx6<CF>(A, B, Cm, M, N, K, lda, ldc, chunk1, chunk2, m1p, m1s, smem_raw);                                  \
++    }
++
++// (BM, BN, BK, warps M, warps N, stages)
++using Y128x128k64 = Cfg<128, 128, 64, 2, 4, 3>;     // 96 KB, warp tile 64x32 (= nh9 / ns9 128x128k64)
++using Y128x128k32 = Cfg<128, 128, 32, 2, 4, 4>;     // 64 KB
++using Y64x256k32 = Cfg<64, 256, 32, 1, 8, 4>;       // 80 KB, 64-row tiles
++using Y128x64k64 = Cfg<128, 64, 64, 4, 2, 3>;       // 72 KB, warp tile 32x32 (small N: more CTAs)
++using Y64x128k64 = Cfg<64, 128, 64, 2, 4, 3>;       // 48 KB, warp tile 32x32 (64-row tiles)
++SKX6(gemm_skx6_128x128k64, Y128x128k64)
++SKX6(gemm_skx6_128x128k32, Y128x128k32)
++SKX6(gemm_skx6_64x256k32, Y64x256k32)
++SKX6(gemm_skx6_128x64k64, Y128x64k64)
++SKX6(gemm_skx6_64x128k64, Y64x128k64)
+diff -ruN a/s1eng/skx6t.cu b/s1eng/skx6t.cu
+--- a/s1eng/skx6t.cu	1970-01-01 00:00:00.000000000 +0000
++++ b/s1eng/skx6t.cu	2026-10-21 21:02:26.706326342 +0000
+@@ -0,0 +1,414 @@
++// SKX6T (ruj skx6t track, 2026-10-21): skx6 (skx6.cu, the MX two-class GEMM of mixed-bucket graphs) without the padded
++// tail work. Every stored output element keeps skx6's arithmetic exactly: per class, S = ceil(K / chunk) slices (the
++// last one the rest); each slice is one ascending-k chain of mma.sync m16n8k16 (fp32) from +0 over its k16 steps,
++// rounded once to bf16; the slices are folded in slice order with fp32 RN adds starting from the first partial itself
++// (tot = f(b(acc_0)); tot = tot + f(b(acc_s))), rounded once (S = 1: bf16(acc_0)). Rows [0, M1) take class 1 (chunk1),
++// rows [M1, M) class 2 (chunk2); M1 = *m1p (int32 on the device, clamped to [0, M]), m1p == nullptr -> M1 = m1s.
++//   C[M, N] = A[M, K] @ B[N, K]^T, A = activations (lda), B = weight [N, K] (ld K), C bf16 (ldc).
++// Only the work on rows that are never stored changes:
++//   gemm_skx6t_<cfg>  skx6's schedule: grid (N / BN, ceil(M / BM) + 1), class-1 tiles over [0, M1), class-2 tiles from
++//                     row M1 on, tiles past both segments exit at once; in the last (partial) tile of a segment every
++//                     warp skips its m16 row sub-tiles that lie wholly past the segment end (their ldmatrix + mma.sync;
++//                     a warp with no row left skips its B fragments too, but still issues its share of the CTA's
++//                     cp.async loads and joins every barrier).
++//   gemm_skx6m_<cfg>  one tile grid over [0, M): grid (N / BN, ceil(M / BM)). The tile that holds row M1 carries rows of
++//                     both classes: the k-loop runs through the union of both classes' slice ends and each accumulator
++//                     row folds only at its own class's slice ends, so every row's chain is the one skx6 gives it (the
++//                     MMA rows of mma.sync are independent: a row's sums never see another row's data). The last tile
++//                     skips the m16 sub-tiles past M as above.
++// The hot loop (SKX3's branch-free k-tile with loads ST - 1 ahead, checked only in the last ST k-tiles) is skx6's; full
++// tiles run it without any skip predicate (template FULL).
++// Needs N % BN == 0, K % BK == 0, chunk % BK == 0, 16-byte aligned rows.
++// Build (nvcc 13.4, V13.4.92, reproduces the shipped cubin byte for byte):
++//   nvcc -arch=sm_120a -O3 -cubin -Xptxas -v -o skx6t.cubin skx6t.cu
++#include <cuda_bf16.h>
++#include <stdint.h>
++
++#include <type_traits>
++
++#define DEVI __device__ __forceinline__
++
++DEVI uint32_t smem_u32(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
++DEVI void cp16(uint32_t dst, const void* src, uint32_t sz) {
++    asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16, %2;\n" ::"r"(dst), "l"(src), "r"(sz));
++}
++DEVI void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
++template <int N>
++DEVI void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
++DEVI void ldsm_x4(uint32_t addr, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) {
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(addr));
++}
++DEVI void mma16816(float* d, const uint32_t* a, uint32_t b0, uint32_t b1) {
++    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
++                 "{%0,%1,%2,%3};\n"
++                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
++                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
++}
++DEVI uint32_t pack_bf2(float a, float b) {
++    __nv_bfloat162 v = __floats2bfloat162_rn(a, b);
++    return *reinterpret_cast<uint32_t*>(&v);
++}
++DEVI float bf_round(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
++
++template <int BK>
++DEVI int swz_f(int r) {
++    if constexpr (BK == 32) return (r >> 1) & 3;
++    else return r & 7;
++}
++
++template <int BM_, int BN_, int BK_, int WM_, int WN_, int ST_>
++struct Cfg {
++    static constexpr int BM = BM_, BN = BN_, BK = BK_, WM = WM_, WN = WN_, ST = ST_;
++    static constexpr int T = WM * WN * 32;
++    static constexpr int WTM = BM / WM, WTN = BN / WN;
++    static constexpr int MT = WTM / 16, NT = WTN / 8, KS = BK / 16, CH = BK / 8;
++    static constexpr int A_ST = BM * BK, B_ST = BN * BK;   // bf16 elements per stage
++    static constexpr int AI = BM * CH / T, BI = BN * CH / T;   // 16-byte chunks per thread per stage
++    static constexpr int RS = T / CH;                         // row step between one thread's chunks
++    static constexpr int SMEM = ST * (A_ST + B_ST) * 2;
++    static constexpr int E = MT * NT * 4;    // fp32 accumulators per thread
++    static_assert(MT >= 1 && NT % 2 == 0 && KS % 2 == 0, "tile");
++    static_assert((BM * CH) % T == 0 && (BN * CH) % T == 0 && RS % 8 == 0, "loader");
++};
++
++// one output tile, the part of ONE warp: rows [m0, min(m0 + BM, mend)) are stored; the warp's m16 row sub-tiles
++// i < ACT hold rows below mend (ACT is a compile-time count, so a warp's hot loop has no skip predicate: predicated
++// ldmatrix / mma.sync groups make ptxas fence each group with WARPSYNC and lose the load / MMA interleave); warps with
++// other ACT values of the same CTA run their own instantiation, with the same cp.async loads and barriers per k-tile.
++// has1 / has2 = rows of class 1 / class 2 in the tile (rows below M1 are class 1); KC1 / KC2 = the classes' slice
++// widths in k-tiles (>= KT: unsplit). MIXED (skx6m's boundary tile): the k-loop runs to the union of both classes'
++// slice ends and each m16 sub-tile folds at its own class's ends (a sub-tile that straddles M1 per row).
++template <class C, int ACT, bool MIXED>
++DEVI void tile(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B, __nv_bfloat16* __restrict__ Cm,
++               int K, int lda, int ldc, int m0, int mend, int M1, bool has1, int KC1, int KC2,
++               unsigned char* smem_raw) {
++    constexpr int BN = C::BN, BK = C::BK, ST = C::ST, NT = C::NT, KS = C::KS;
++    constexpr int AT = ACT > 0 ? ACT : 1;   // fragment / accumulator arrays (unused at ACT = 0)
++    const int tid = threadIdx.x;
++    const int n0 = blockIdx.x * BN;
++    const int KT = K / BK;
++
++    // ---- loader: thread's chunk column and first row; its rows are r0 + c * RS (skx6's, rows past mend zero-filled)
++    const uint32_t sA0 = smem_u32(smem_raw);
++    const uint32_t sB0 = sA0 + ST * C::A_ST * 2;
++    const int lr0 = tid / C::CH, lcc = tid % C::CH;
++    const uint32_t lso = (lr0 * BK + ((lcc ^ swz_f<BK>(lr0)) * 8)) * 2;   // + c * RS * BK * 2 per chunk
++    const __nv_bfloat16* pa[C::AI];
++    const __nv_bfloat16* pb[C::BI];
++    uint32_t asz[C::AI];
++#pragma unroll
++    for (int c = 0; c < C::AI; ++c) {
++        const int gm = m0 + lr0 + c * C::RS;
++        asz[c] = gm < mend ? 16u : 0u;
++        pa[c] = A + (size_t)(gm < mend ? gm : mend - 1) * lda + lcc * 8;
++    }
++#pragma unroll
++    for (int c = 0; c < C::BI; ++c) pb[c] = B + (size_t)(n0 + lr0 + c * C::RS) * K + lcc * 8;
++    int lrem = KT;   // k-tiles still to load
++    auto issue_a = [&](int st) {
++        const uint32_t a = sA0 + st * C::A_ST * 2 + lso;
++#pragma unroll
++        for (int c = 0; c < C::AI; ++c) cp16(a + c * C::RS * BK * 2, pa[c], asz[c]);
++#pragma unroll
++        for (int c = 0; c < C::AI; ++c) pa[c] += BK;
++    };
++    auto issue_b = [&](int st) {
++        const uint32_t b = sB0 + st * C::B_ST * 2 + lso;
++#pragma unroll
++        for (int c = 0; c < C::BI; ++c) cp16(b + c * C::RS * BK * 2, pb[c], 16u);
++#pragma unroll
++        for (int c = 0; c < C::BI; ++c) pb[c] += BK;
++    };
++
++    // ---- fragments
++    const int warp = tid / 32, lane = tid % 32;
++    const int wm = warp / C::WN, wn = warp % C::WN;
++    const int a_r = wm * C::WTM + (lane % 16);
++    const int a_f = swz_f<BK>(lane % 16);
++    const int a_kc = lane / 16;
++    const int b_r = wn * C::WTN + (lane / 16) * 8 + (lane % 8);
++    const int b_f = swz_f<BK>((lane / 16) * 8 + (lane % 8));
++    const int b_kc = (lane / 8) % 2;
++    uint32_t a_off[KS], b_off[KS];
++#pragma unroll
++    for (int ks = 0; ks < KS; ++ks) {
++        a_off[ks] = (a_r * BK + (((ks * 2 + a_kc) ^ a_f) * 8)) * 2;
++        b_off[ks] = (b_r * BK + (((ks * 2 + b_kc) ^ b_f) * 8)) * 2;
++    }
++    uint32_t af[2][AT][4];
++    uint32_t bfr[2][NT][2];
++    auto load_frags = [&](int buf, int stage, int ks) {
++        if constexpr (ACT > 0) {
++            const uint32_t a = sA0 + stage * C::A_ST * 2 + a_off[ks];
++            const uint32_t b = sB0 + stage * C::B_ST * 2 + b_off[ks];
++#pragma unroll
++            for (int i = 0; i < ACT; ++i)
++                ldsm_x4(a + i * 16 * BK * 2, af[buf][i][0], af[buf][i][1], af[buf][i][2], af[buf][i][3]);
++#pragma unroll
++            for (int j = 0; j < NT; j += 2)
++                ldsm_x4(b + j * 8 * BK * 2, bfr[buf][j][0], bfr[buf][j][1], bfr[buf][j + 1][0], bfr[buf][j + 1][1]);
++        }
++    };
++
++    // ---- prologue: ST - 1 k-tiles in flight
++#pragma unroll
++    for (int s = 0; s < ST - 1; ++s) {
++        if (lrem > 0) {
++            issue_a(s);
++            issue_b(s);
++            --lrem;
++        }
++        cp_commit();
++    }
++    cp_wait<ST - 2>();
++    __syncthreads();
++    load_frags(0, 0, 0);
++    int cst = 0, lst = ST - 1;   // compute stage, load stage
++
++    float acc[AT][NT][4];
++    float tot[AT * NT * 4];
++#pragma unroll
++    for (int i = 0; i < AT; ++i)
++#pragma unroll
++        for (int j = 0; j < NT; ++j)
++#pragma unroll
++            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
++
++    // one k-tile: MMAs of k-step ks, then this k-tile's share of the loads ST - 1 k-tiles ahead (A after step 0, B after
++    // step 1, committed before the wait of the last step); FAST: a load is due (no check)
++    auto ktile = [&](auto fast) {
++        constexpr bool FAST = decltype(fast)::value;
++        const int nst = cst + 1 == ST ? 0 : cst + 1;
++        const bool ld = FAST || lrem > 0;
++#pragma unroll
++        for (int ks = 0; ks < KS; ++ks) {
++            if (ks == KS - 1) {
++                cp_wait<ST - 2>();
++                __syncthreads();
++            }
++            if (ks < KS - 1) load_frags((ks + 1) & 1, cst, ks + 1);
++            else load_frags(0, nst, 0);
++#pragma unroll
++            for (int i = 0; i < ACT; ++i)
++#pragma unroll
++                for (int jj = 0; jj < NT; ++jj) {
++                    const int j = (i & 1) ? NT - 1 - jj : jj;   // serpentine: B operand reuse
++                    mma16816(acc[i][j], af[ks & 1][i], bfr[ks & 1][j][0], bfr[ks & 1][j][1]);
++                }
++            if (ks == 0 && ld) issue_a(lst);
++            if (ks == (KS > 2 ? 1 : 0)) {
++                if (ld) {
++                    issue_b(lst);
++                    --lrem;
++                }
++                cp_commit();
++                lst = lst + 1 == ST ? 0 : lst + 1;
++            }
++        }
++        cst = nst;
++    };
++    // k-tiles [k0, k1): FAST while the load ST - 1 ahead is surely inside K
++    auto run_range = [&](int k0, int k1) {
++        const int f = min(k1, KT - ST);
++        int k = k0;
++        for (; k < f; ++k) ktile(std::true_type{});
++        for (; k < k1; ++k) ktile(std::false_type{});
++    };
++
++    const int g = lane / 4, t4 = lane % 4;
++    auto store_c = [&](const float* v) {
++#pragma unroll
++        for (int i = 0; i < ACT; ++i)
++#pragma unroll
++            for (int j = 0; j < NT; ++j) {
++                const int r = m0 + wm * C::WTM + i * 16 + g;
++                const int c = n0 + wn * C::WTN + j * 8 + t4 * 2;
++                const float* q = v + (i * NT + j) * 4;
++                if (r < mend) *reinterpret_cast<uint32_t*>(Cm + (size_t)r * ldc + c) = pack_bf2(q[0], q[1]);
++                if (r + 8 < mend) *reinterpret_cast<uint32_t*>(Cm + (size_t)(r + 8) * ldc + c) = pack_bf2(q[2], q[3]);
++            }
++    };
++
++    if constexpr (!MIXED) {   // a one-class tile: skx6's slice loop and fold, unchanged
++        const int KC = has1 ? KC1 : KC2;
++        const int S = (KT + KC - 1) / KC;
++        if (S <= 1) {
++            run_range(0, KT);
++            cp_wait<0>();
++            store_c(&acc[0][0][0]);
++            return;
++        }
++        for (int s = 0; s < S; ++s) {
++            const int k0 = s * KC;
++            const int k1 = s + 1 < S ? k0 + KC : KT;
++            if (s > 0) {
++#pragma unroll
++                for (int i = 0; i < AT; ++i)
++#pragma unroll
++                    for (int j = 0; j < NT; ++j)
++#pragma unroll
++                        for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
++            }
++            run_range(k0, k1);
++            const float* a = &acc[0][0][0];
++            if (s == 0) {
++#pragma unroll
++                for (int e = 0; e < ACT * NT * 4; ++e) tot[e] = bf_round(a[e]);
++            } else {
++#pragma unroll
++                for (int e = 0; e < ACT * NT * 4; ++e) tot[e] = tot[e] + bf_round(a[e]);
++            }
++        }
++        cp_wait<0>();
++        store_c(tot);
++    } else {
++        // skx6m's boundary tile (rows of both classes): the k-loop runs to the union of both classes' slice ends
++        // (class c: KC_c, 2 KC_c, .., KT); at each end the sub-tiles of the class(es) ending there fold (first slice:
++        // tot = b(acc); later: tot = tot + b(acc); unsplit class: tot = acc at KT) and restart their chain from +0. A
++        // sub-tile wholly on one side of M1 decides with warp-uniform branches; the one that straddles M1 per row.
++        int e1 = min(KC1, KT), e2 = min(KC2, KT);
++        bool p1 = true, p2 = true;   // the class's first slice is still open
++        int k = 0;
++        while (k < KT) {
++            const int e = min(e1, e2);
++            run_range(k, e);
++            k = e;
++            const bool f1 = e == e1, f2 = e == e2;
++            const bool u1 = KC1 >= KT, u2 = KC2 >= KT;
++#pragma unroll
++            for (int i = 0; i < ACT; ++i) {
++                const int rb = m0 + wm * C::WTM + i * 16;   // the sub-tile's first row (warp-uniform)
++                float* a = &acc[i][0][0];
++                float* t = &tot[i * NT * 4];
++                if (rb + 16 <= M1 || rb >= M1) {   // one class
++                    const bool c1 = rb + 16 <= M1;
++                    if (c1 ? f1 : f2) {
++                        const bool un = c1 ? u1 : u2, first = c1 ? p1 : p2;
++                        if (un) {
++#pragma unroll
++                            for (int x = 0; x < NT * 4; ++x) t[x] = a[x];
++                        } else if (first) {
++#pragma unroll
++                            for (int x = 0; x < NT * 4; ++x) {
++                                t[x] = bf_round(a[x]);
++                                a[x] = 0.f;
++                            }
++                        } else {
++#pragma unroll
++                            for (int x = 0; x < NT * 4; ++x) {
++                                t[x] = t[x] + bf_round(a[x]);
++                                a[x] = 0.f;
++                            }
++                        }
++                    }
++                } else {   // rows g / g + 8 of this thread on either side of M1
++#pragma unroll
++                    for (int h = 0; h < 2; ++h) {
++                        const bool c1 = rb + g + 8 * h < M1;
++                        if (c1 ? f1 : f2) {
++                            const bool un = c1 ? u1 : u2, first = c1 ? p1 : p2;
++#pragma unroll
++                            for (int j = 0; j < NT; ++j)
++#pragma unroll
++                                for (int q2 = 0; q2 < 2; ++q2) {
++                                    float& av = a[j * 4 + h * 2 + q2];
++                                    float& tv = t[j * 4 + h * 2 + q2];
++                                    tv = un ? av : (first ? bf_round(av) : tv + bf_round(av));
++                                    av = 0.f;
++                                }
++                        }
++                    }
++                }
++            }
++            if (f1) {
++                p1 = false;
++                e1 = min(e1 + KC1, KT);
++            }
++            if (f2) {
++                p2 = false;
++                e2 = min(e2 + KC2, KT);
++            }
++        }
++        cp_wait<0>();
++        store_c(tot);
++    }
++}
++
++// the warp's active m16 sub-tile count (rows below mend) as a template argument
++template <class C, bool MIXED, int A = C::MT>
++DEVI void tile_act(int act, const __nv_bfloat16* __restrict__ Ap, const __nv_bfloat16* __restrict__ B,
++                   __nv_bfloat16* __restrict__ Cm, int K, int lda, int ldc, int m0, int mend, int M1, bool has1,
++                   int KC1, int KC2, unsigned char* smem_raw) {
++    if constexpr (A > 0) {
++        if (act < A) {
++            tile_act<C, MIXED, A - 1>(act, Ap, B, Cm, K, lda, ldc, m0, mend, M1, has1, KC1, KC2, smem_raw);
++            return;
++        }
++    }
++    tile<C, A, MIXED>(Ap, B, Cm, K, lda, ldc, m0, mend, M1, has1, KC1, KC2, smem_raw);
++}
++
++// MERGE = false: skx6's two segment grids (gemm_skx6t_*); true: one grid over [0, M) (gemm_skx6m_*)
++template <class C, bool MERGE>
++DEVI void skx6x(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B, __nv_bfloat16* __restrict__ Cm,
++                int M, int N, int K, int lda, int ldc, int chunk1, int chunk2, const int* __restrict__ m1p, int m1s,
++                unsigned char* smem_raw) {
++    constexpr int BM = C::BM, BK = C::BK;
++    int M1 = m1p != nullptr ? __ldg(m1p) : m1s;
++    M1 = M1 < 0 ? 0 : (M1 > M ? M : M1);
++    const int t = blockIdx.y;
++    int m0, mend;
++    bool has1, has2;
++    if constexpr (MERGE) {
++        m0 = t * BM;
++        if (m0 >= M) return;
++        mend = M;
++        has1 = m0 < M1;
++        has2 = min(m0 + BM, M) > M1;
++    } else {
++        const int mt1 = (M1 + BM - 1) / BM, mt2 = (M - M1 + BM - 1) / BM;
++        if (t < mt1) {
++            m0 = t * BM; mend = M1; has1 = true; has2 = false;
++        } else if (t - mt1 < mt2) {
++            m0 = M1 + (t - mt1) * BM; mend = M; has1 = false; has2 = true;
++        } else {
++            return;   // past both segments (the grid has one spare row tile for a boundary inside a tile)
++        }
++    }
++    const int KC1 = chunk1 / BK, KC2 = chunk2 / BK;
++    const int wm = (threadIdx.x / 32) / C::WN;
++    const int left = mend - (m0 + wm * C::WTM);   // rows of this warp below mend
++    // warp-uniform by construction (the shuffle from lane 0 lets ptxas prove it: no WARPSYNC around the per-warp
++    // instantiations' ldmatrix / mma.sync)
++    const int act = __shfl_sync(0xffffffffu, left <= 0 ? 0 : (left >= C::WTM ? C::MT : (left + 15) / 16), 0);
++    if (MERGE && has1 && has2)   // skx6m's boundary tile
++        tile_act<C, true>(act, A, B, Cm, K, lda, ldc, m0, mend, M1, has1, KC1, KC2, smem_raw);
++    else
++        tile_act<C, false>(act, A, B, Cm, K, lda, ldc, m0, mend, M1, has1, KC1, KC2, smem_raw);
++}
++
++#define SKX6X(NAME, CF, MERGE)                                                                                     \
++    extern "C" __global__ void __launch_bounds__(CF::T, 1)                                                         \
++        NAME(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ B, __nv_bfloat16* __restrict__ Cm, \
++             int M, int N, int K, int lda, int ldc, int chunk1, int chunk2, const int* __restrict__ m1p, int m1s) { \
++        extern __shared__ __align__(128) unsigned char smem_raw[];                                                  \
++        skx6x<CF, MERGE>(A, B, Cm, M, N, K, lda, ldc, chunk1, chunk2, m1p, m1s, smem_raw);                          \
++    }
++
++// (BM, BN, BK, warps M, warps N, stages): skx6's five configs
++using Y128x128k64 = Cfg<128, 128, 64, 2, 4, 3>;     // 96 KB, warp tile 64x32 (= nh9 / ns9 128x128k64)
++using Y128x128k32 = Cfg<128, 128, 32, 2, 4, 4>;     // 64 KB
++using Y64x256k32 = Cfg<64, 256, 32, 1, 8, 4>;       // 80 KB, 64-row tiles
++using Y128x64k64 = Cfg<128, 64, 64, 4, 2, 3>;       // 72 KB, warp tile 32x32 (small N: more CTAs)
++using Y64x128k64 = Cfg<64, 128, 64, 2, 4, 3>;       // 48 KB, warp tile 32x32 (64-row tiles)
++SKX6X(gemm_skx6t_128x128k64, Y128x128k64, false)
++SKX6X(gemm_skx6t_128x128k32, Y128x128k32, false)
++SKX6X(gemm_skx6t_64x256k32, Y64x256k32, false)
++SKX6X(gemm_skx6t_128x64k64, Y128x64k64, false)
++SKX6X(gemm_skx6t_64x128k64, Y64x128k64, false)
++SKX6X(gemm_skx6m_128x128k64, Y128x128k64, true)
++SKX6X(gemm_skx6m_128x128k32, Y128x128k32, true)
++SKX6X(gemm_skx6m_64x256k32, Y64x256k32, true)
++SKX6X(gemm_skx6m_128x64k64, Y128x64k64, true)
++SKX6X(gemm_skx6m_64x128k64, Y64x128k64, true)

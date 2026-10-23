@@ -1,0 +1,18 @@
+{
+  "command": [
+    "/usr/local/cuda-13.0/bin/nvcc",
+    "-O3",
+    "-arch=sm_120a",
+    "--cubin",
+    "-Xptxas=-v",
+    "-I/workspace/reax-precision-search/output/native-hybrid8-screen-r2",
+    "/workspace/reax-precision-search/snapshots/native-hybrid8-screen-r2/native_hybrid8.cu",
+    "-o",
+    "/workspace/reax-precision-search/output/native-hybrid8-screen-r2/native_hybrid8.cubin"
+  ],
+  "attribution": "NG5 load/MMA/epilogue helpers; integer part followed by BF16 contribution into FP32 registers",
+  "baseline_sha256": "1d6410833144ece27b1ab85812e94868d5ff4fe714139109bf4a68116243ed0d",
+  "header_sha256": "9e94457532adde482b54d318eccda2ad6686e92f1207f1c7aae9ddb475c81512",
+  "source_sha256": "b8baf626aa69c32db64ec35f4eb4ca8886fb2f4f953d77617bc0322cbd02b00e",
+  "binary_sha256": "59af3954d443b50df512f58d9156519f0945425cc4b73266d3c43e2697b8ac02"
+}

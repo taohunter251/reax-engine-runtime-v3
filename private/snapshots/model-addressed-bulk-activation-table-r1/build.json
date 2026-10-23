@@ -1,0 +1,16 @@
+{
+  "exit_code": 0,
+  "command": [
+    "/usr/local/cuda-13.0/bin/nvcc",
+    "-O3",
+    "-std=c++17",
+    "-arch=sm_120a",
+    "--cubin",
+    "-Xptxas=-v",
+    "/workspace/reax-local-quant-lab/snapshots/model-addressed-bulk-activation-table-r1/addressed_gate_up.cu",
+    "-o",
+    "/workspace/reax-local-quant-lab/snapshots/model-addressed-bulk-activation-table-r1/addressed_gate_up.cubin"
+  ],
+  "source_sha256": "20769514f35451d8ff8c21d5baa36fe1467778eb83ad9b8f30992e23e8431787",
+  "binary_sha256": "dfb1fea657c50d2711f4c62cf7d914f40ef4ad6f4e673172ef1c5147eded69ea"
+}

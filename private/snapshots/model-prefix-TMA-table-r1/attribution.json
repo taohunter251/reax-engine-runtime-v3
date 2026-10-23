@@ -1,0 +1,5 @@
+{
+  "parent": "Public UID176 NG9B MIT exact MMA/rounding; local ordered TMA transport and complete BF16-domain SiLU table",
+  "changes": "Both explicit reuse ordering controls, same ascendingK16dot, exactBF16SiLU lookup plus four model-shape geometries. No precision or weight change.",
+  "scope": "Local only; needs isolated 65536domain and actual operator/control proof before any fullmodel qualification"
+}

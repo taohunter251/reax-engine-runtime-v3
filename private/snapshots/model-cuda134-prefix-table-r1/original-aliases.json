@@ -1,0 +1,12 @@
+{
+  "nsw9_b128x256k64_s64x256k64": "prefix_table_0",
+  "nsw9_b128x256k64_s32x256k64": "prefix_table_1",
+  "nsw9_b128x256k64_s64x256": "prefix_table_2",
+  "nsw9_b128x256k64_s32x256": "prefix_table_3",
+  "nsw9_b128x128k64_s64x128k64": "prefix_table_4",
+  "nsw9_b128x128k64_s32x128": "prefix_table_5",
+  "nsw9_b128x256k64_t160x128k64": "prefix_table_6",
+  "nsw9_b128x256k64_t192x128k64": "prefix_table_7",
+  "nsw9_b128x256k64_t224x128k64": "prefix_table_8",
+  "nsw9_b128x256k64_s96x256k64": "prefix_table_9"
+}

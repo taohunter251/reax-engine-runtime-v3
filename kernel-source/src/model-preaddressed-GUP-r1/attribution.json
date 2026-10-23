@@ -1,0 +1,5 @@
+{
+  "parent": "Public UID56 NG9B mainloop plus prior attributed UID56/164 hybrid conversion.",
+  "ng9b_sha256": "fc4e85d600ed8caefcbcf753ff94072f9ddb2dc1aeee44617dfb668dd617be55",
+  "local_change": "Use precomputed loader offsets and serpentine instruction order for frozen INT8/BF16 banks; preserve original rounding and columns."
+}

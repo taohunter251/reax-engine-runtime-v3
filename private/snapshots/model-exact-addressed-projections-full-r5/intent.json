@@ -1,0 +1,10 @@
+{
+  "parent": "model-exact-addressed-projections-full-r4",
+  "corpus": "512independentfreshrequests; route selection from exact operator timings only.",
+  "extra_GUP_rows": "256..2304,4408frozenarithmeticcontrols",
+  "quantization_unchanged": true,
+  "model_weights_unchanged": true,
+  "minimum_required_engine_gain": 0.03,
+  "graph_pools": "Sixdisjointpools;twoindependentscratchpairsreusedonlysequentially.",
+  "GEMM_marks": "Include new kernel names for eventual serving graph priority parity."
+}

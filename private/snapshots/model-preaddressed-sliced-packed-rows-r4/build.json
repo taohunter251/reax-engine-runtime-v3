@@ -1,0 +1,16 @@
+{
+  "exit_code": 0,
+  "command": [
+    "/usr/local/cuda-13.0/bin/nvcc",
+    "-O3",
+    "-std=c++17",
+    "-arch=sm_120a",
+    "--cubin",
+    "-Xptxas=-v",
+    "/workspace/reax-local-quant-lab/snapshots/model-preaddressed-sliced-projections-r1/addressed_sliced.cu",
+    "-o",
+    "/workspace/reax-local-quant-lab/snapshots/model-preaddressed-sliced-projections-r1/addressed_sliced.cubin"
+  ],
+  "source_sha256": "662d2c5b24e77f96fb29a9787f88609d5f350098845cd69e4b5bac31adbd9d92",
+  "binary_sha256": "88a70bf1f99287ddcb3fad31b29f9a62b9dfd7c36a77005ea02248d5d849cf81"
+}

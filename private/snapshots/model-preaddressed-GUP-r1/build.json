@@ -1,0 +1,16 @@
+{
+  "exit_code": 0,
+  "command": [
+    "/usr/local/cuda-13.0/bin/nvcc",
+    "-O3",
+    "-std=c++17",
+    "-arch=sm_120a",
+    "--cubin",
+    "-Xptxas=-v",
+    "/workspace/reax-local-quant-lab/snapshots/model-preaddressed-GUP-r1/addressed_gate_up.cu",
+    "-o",
+    "/workspace/reax-local-quant-lab/snapshots/model-preaddressed-GUP-r1/addressed_gate_up.cubin"
+  ],
+  "source_sha256": "362afa0ebc61fdf84e80f13af9249769ae0011455b7de91cb4d84150c6739fda",
+  "binary_sha256": "abeaa123532687198ed7435751d3152628f787b60dcd4407bccc724920a77641"
+}

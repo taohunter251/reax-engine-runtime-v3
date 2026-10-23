@@ -1,0 +1,1 @@
+{"parent": "model-preaddressed-GUP-tail-bands-r2", "source_sha256": "6170fcffe0a1da6268af6a9b9370de035ab9629a8b26c8d5f6020b45e2737a31", "change": "Replace BF16-rounded SiLU evaluation with exhaustive, GPU-generated exact BF16 table; all weights, MMA groups and matrix layouts unchanged."}

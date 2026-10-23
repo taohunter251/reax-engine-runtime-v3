@@ -1,0 +1,5 @@
+{
+  "parent": "Attributed preaddressed-GUP-r1 derived from public UID56/164.",
+  "parent_source_sha256": "362afa0ebc61fdf84e80f13af9249769ae0011455b7de91cb4d84150c6739fda",
+  "local_change": "Protected-INT8 paired gates with64/96/160/192/224-row tail bands and independent tail column width."
+}

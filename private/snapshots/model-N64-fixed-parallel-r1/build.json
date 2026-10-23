@@ -1,0 +1,16 @@
+{
+  "exit_code": 0,
+  "command": [
+    "/workspace/reax-local-quant-lab/toolchain/cuda134/nvidia/cu13/bin/nvcc",
+    "-O3",
+    "-std=c++17",
+    "-arch=sm_120a",
+    "--cubin",
+    "-Xptxas=-v",
+    "/workspace/reax-local-quant-lab/snapshots/model-N64-fixed-parallel-r1/n64_parts.cu",
+    "-o",
+    "/workspace/reax-local-quant-lab/snapshots/model-N64-fixed-parallel-r1/n64_parts.cubin"
+  ],
+  "source_sha256": "203cb6f089b7b65b4f034ce5dd112083f20ea333ecc6c39946d436af39eb4b4a",
+  "binary_sha256": "c878575f7309d624bcfd31e95981293813ce4505370b884914881954322bc751"
+}

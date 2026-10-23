@@ -1,0 +1,100 @@
+{
+  "schema": 1,
+  "toolchain": {
+    "nvcc": "13.4.92",
+    "architecture": "sm_120a"
+  },
+  "kernels": [
+    {
+      "name": "kkt2n",
+      "source": "vendor/uid176/kkt2n.cu",
+      "source_sha256": "05f7c62710f2e8ba763d7b2b3f5ecda55a3394ba7787541f5d27e46b707865e1",
+      "compiler_flags": [
+        "-cubin",
+        "-arch=sm_120a",
+        "-O3",
+        "-Xptxas",
+        "-v"
+      ],
+      "binary_sha256": "fd5b50c85669d3f106d3415523b62651bf5e6ace69cb0531404059ba87000c3a",
+      "binary_name": "kkt2n.cubin",
+      "inference_image_path": "/opt/reax-v2/vendor/s1eng/kkt2n.cubin"
+    },
+    {
+      "name": "ngemm9l",
+      "source": "vendor/uid176/ngemm9l.cu",
+      "source_sha256": "27a5d2f0eed18ec7f6f2acabe1c2b1e2fee8c28807be5ba0bdc28e927281ff26",
+      "compiler_flags": [
+        "-cubin",
+        "-arch=sm_120a",
+        "-O3",
+        "-Xptxas",
+        "-v"
+      ],
+      "binary_sha256": "f35d8d2a2d44d01a0de8154adeaac94651035aaf83aaf04e021f048d37b57e88",
+      "binary_name": "ngemm9l.cubin",
+      "inference_image_path": "/opt/reax-v2/vendor/s1eng/ngemm9l.cubin"
+    },
+    {
+      "name": "ngemm9t",
+      "source": "vendor/uid176/ngemm9t.cu",
+      "source_sha256": "a2f47b5a440b1f99c684da5ba25692eaf65b184500df046810452887ae0b222a",
+      "compiler_flags": [
+        "-cubin",
+        "-arch=sm_120a",
+        "-O3",
+        "-Xptxas",
+        "-v"
+      ],
+      "binary_sha256": "111b70b04ac63f4c12f82145d45a1ae64bafb3c5f812fd3dae4b195b08e7f70d",
+      "binary_name": "ngemm9t.cubin",
+      "inference_image_path": "/opt/reax-v2/vendor/s1eng/ngemm9t.cubin"
+    },
+    {
+      "name": "ngr",
+      "source": "vendor/uid176/ngr.cu",
+      "source_sha256": "fe6934567dcea3a771a9fdabdf838389290d30f04e5baa4cf3ce3eee30af6db7",
+      "compiler_flags": [
+        "-cubin",
+        "-arch=sm_120a",
+        "-O3",
+        "-Xptxas",
+        "-v"
+      ],
+      "binary_sha256": "15dc8936691b884e1364a5c57f64470e354bc59c6c64c1244307fcf614f8e889",
+      "binary_name": "ngr.cubin",
+      "inference_image_path": "/opt/reax-v2/vendor/s1eng/ngr.cubin"
+    },
+    {
+      "name": "xa",
+      "source": "vendor/uid176/xa.cu",
+      "source_sha256": "231ea2f7bfd427b1df8eeb72d00394e7650de67ca74e3f67380e23b79547a756",
+      "compiler_flags": [
+        "-cubin",
+        "-arch=sm_120a",
+        "-O3",
+        "-Xptxas",
+        "-v"
+      ],
+      "binary_sha256": "8d119f6b271de9ccf86d58b99b5a37299cc9460b1c247f4a74e70bd8154762aa",
+      "binary_name": "xa.cubin",
+      "inference_image_path": "/opt/reax-v2/vendor/s1eng/xa.cubin"
+    },
+    {
+      "name": "pron",
+      "source": "vendor/uid164/pron.cu",
+      "source_sha256": "8bfa8dd5f059d4f9dfba81bad9a67a0aec5ec9e9895606457b87ebc1208fdf4a",
+      "compiler_flags": [
+        "-cubin",
+        "-arch=sm_120a",
+        "-O3",
+        "-DPRON_SHIP",
+        "-Xptxas",
+        "-v"
+      ],
+      "binary_sha256": "f34ec4fb457a129b920928ea3355e689cd739a77d94b75e6236da5e053a34429",
+      "binary_name": "pron.cubin",
+      "inference_image_path": "/opt/reax-v2/vendor/s1eng/pron.cubin"
+    }
+  ]
+}

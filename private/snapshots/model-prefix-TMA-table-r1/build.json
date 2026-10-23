@@ -1,0 +1,16 @@
+{
+  "exit_code": 0,
+  "command": [
+    "/workspace/reax-local-quant-lab/toolchain/cuda134/nvidia/cu13/bin/nvcc",
+    "-O3",
+    "-std=c++17",
+    "-arch=sm_120a",
+    "--cubin",
+    "-Xptxas=-v",
+    "/workspace/reax-local-quant-lab/snapshots/model-prefix-TMA-table-r1/prefix_tma.cu",
+    "-o",
+    "/workspace/reax-local-quant-lab/snapshots/model-prefix-TMA-table-r1/prefix_tma.cubin"
+  ],
+  "source_sha256": "4b29aa9ace4a680fe46de423d5642b389ffa197832384c2aab505d6cb85d6888",
+  "binary_sha256": "5412dc5202f1f71e78fb14e5c80e32c0ee7c50a40026e2edc33c205ea81c6c65"
+}

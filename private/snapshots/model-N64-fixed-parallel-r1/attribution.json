@@ -1,0 +1,4 @@
+{
+  "parent": "Public NG9B BF16 MMA/loader, local addressed leading-stride adaptation and ordered FP32 fold",
+  "change": "Model N64K2560 specialization: fixed independent K64 slices, no origin split or extra CTAs; 6 row/column/load geometries. All model math and parameters preserved."
+}

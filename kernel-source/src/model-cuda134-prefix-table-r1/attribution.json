@@ -1,0 +1,5 @@
+{
+  "parent": "Public MIT UID176 NG9B/NG9T geometries",
+  "source_sha256": "fc4e85d600ed8caefcbcf753ff94072f9ddb2dc1aeee44617dfb668dd617be55",
+  "change": "Original frozen BF16 prefix kernel layouts, same ascending k16 reductions. BF16 SiLU output from exhaustive65536-value GPU initialized exact function table, not approximate activation."
+}

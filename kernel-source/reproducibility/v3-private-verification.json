@@ -1,0 +1,146 @@
+[
+  {
+    "name": "model-preaddressed-GUP-r1",
+    "command": [
+      "/usr/local/cuda-13.0/bin/nvcc",
+      "-O3",
+      "-std=c++17",
+      "-arch=sm_120a",
+      "--cubin",
+      "-Xptxas=-v",
+      "-o",
+      "/workspace/reax-release-v3-build/kernel-check/model-preaddressed-GUP-r1.cubin",
+      "/workspace/reax-release-v3-build/kernels/src/model-preaddressed-GUP-r1/addressed_gate_up.cu"
+    ],
+    "returncode": 0,
+    "sha256": "abeaa123532687198ed7435751d3152628f787b60dcd4407bccc724920a77641",
+    "expected": "abeaa123532687198ed7435751d3152628f787b60dcd4407bccc724920a77641",
+    "byte_identical": true
+  },
+  {
+    "name": "model-preaddressed-GUP-tail-bands-r2",
+    "command": [
+      "/usr/local/cuda-13.0/bin/nvcc",
+      "-O3",
+      "-std=c++17",
+      "-arch=sm_120a",
+      "--cubin",
+      "-Xptxas=-v",
+      "-o",
+      "/workspace/reax-release-v3-build/kernel-check/model-preaddressed-GUP-tail-bands-r2.cubin",
+      "/workspace/reax-release-v3-build/kernels/src/model-preaddressed-GUP-tail-bands-r2/band_gate_up.cu"
+    ],
+    "returncode": 0,
+    "sha256": "fb5a3607bd2ab1f979a552d51370f19d5453b5ad608ef55e50ea7edb45710956",
+    "expected": "fb5a3607bd2ab1f979a552d51370f19d5453b5ad608ef55e50ea7edb45710956",
+    "byte_identical": true
+  },
+  {
+    "name": "model-preaddressed-sliced-packed-rows-r4",
+    "command": [
+      "/usr/local/cuda-13.0/bin/nvcc",
+      "-O3",
+      "-std=c++17",
+      "-arch=sm_120a",
+      "--cubin",
+      "-Xptxas=-v",
+      "-o",
+      "/workspace/reax-release-v3-build/kernel-check/model-preaddressed-sliced-packed-rows-r4.cubin",
+      "/workspace/reax-release-v3-build/kernels/src/model-preaddressed-sliced-packed-rows-r4/addressed_sliced.cu"
+    ],
+    "returncode": 0,
+    "sha256": "88a70bf1f99287ddcb3fad31b29f9a62b9dfd7c36a77005ea02248d5d849cf81",
+    "expected": "88a70bf1f99287ddcb3fad31b29f9a62b9dfd7c36a77005ea02248d5d849cf81",
+    "byte_identical": true
+  },
+  {
+    "name": "model-addressed-bulk-activation-table-r1",
+    "command": [
+      "/usr/local/cuda-13.0/bin/nvcc",
+      "-O3",
+      "-std=c++17",
+      "-arch=sm_120a",
+      "--cubin",
+      "-Xptxas=-v",
+      "-o",
+      "/workspace/reax-release-v3-build/kernel-check/model-addressed-bulk-activation-table-r1.cubin",
+      "/workspace/reax-release-v3-build/kernels/src/model-addressed-bulk-activation-table-r1/addressed_gate_up.cu"
+    ],
+    "returncode": 0,
+    "sha256": "dfb1fea657c50d2711f4c62cf7d914f40ef4ad6f4e673172ef1c5147eded69ea",
+    "expected": "dfb1fea657c50d2711f4c62cf7d914f40ef4ad6f4e673172ef1c5147eded69ea",
+    "byte_identical": true
+  },
+  {
+    "name": "model-addressed-tail-activation-table-r1",
+    "command": [
+      "/usr/local/cuda-13.0/bin/nvcc",
+      "-O3",
+      "-std=c++17",
+      "-arch=sm_120a",
+      "--cubin",
+      "-Xptxas=-v",
+      "-o",
+      "/workspace/reax-release-v3-build/kernel-check/model-addressed-tail-activation-table-r1.cubin",
+      "/workspace/reax-release-v3-build/kernels/src/model-addressed-tail-activation-table-r1/band_gate_up.cu"
+    ],
+    "returncode": 0,
+    "sha256": "e0dd831fac33e890f17c621ab3cc8302d842765ef5c4c9e563cef444add0fa17",
+    "expected": "e0dd831fac33e890f17c621ab3cc8302d842765ef5c4c9e563cef444add0fa17",
+    "byte_identical": true
+  },
+  {
+    "name": "model-cuda134-prefix-table-r1",
+    "command": [
+      "/usr/local/cuda-13.0/bin/nvcc",
+      "-O3",
+      "-std=c++17",
+      "-arch=sm_120a",
+      "--cubin",
+      "-Xptxas=-v",
+      "-o",
+      "/workspace/reax-release-v3-build/kernel-check/model-cuda134-prefix-table-r1.cubin",
+      "/workspace/reax-release-v3-build/kernels/src/model-cuda134-prefix-table-r1/prefix_axis.cu"
+    ],
+    "returncode": 0,
+    "sha256": "d91e84c649b65220b84fa1b410cf72e286ff3cc55ed0e558652241ffa652b516",
+    "expected": "d91e84c649b65220b84fa1b410cf72e286ff3cc55ed0e558652241ffa652b516",
+    "byte_identical": true
+  },
+  {
+    "name": "model-N64-fixed-parallel-r1",
+    "command": [
+      "/workspace/reax-local-quant-lab/toolchain/cuda134/nvidia/cu13/bin/nvcc",
+      "-O3",
+      "-std=c++17",
+      "-arch=sm_120a",
+      "--cubin",
+      "-Xptxas=-v",
+      "-o",
+      "/workspace/reax-release-v3-build/kernel-check/model-N64-fixed-parallel-r1.cubin",
+      "/workspace/reax-release-v3-build/kernels/src/model-N64-fixed-parallel-r1/n64_parts.cu"
+    ],
+    "returncode": 0,
+    "sha256": "c878575f7309d624bcfd31e95981293813ce4505370b884914881954322bc751",
+    "expected": "c878575f7309d624bcfd31e95981293813ce4505370b884914881954322bc751",
+    "byte_identical": true
+  },
+  {
+    "name": "local-fold",
+    "command": [
+      "/usr/local/cuda-13.0/bin/nvcc",
+      "-O3",
+      "-std=c++17",
+      "-arch=sm_120a",
+      "--cubin",
+      "-Xptxas=-v",
+      "-o",
+      "/workspace/reax-release-v3-build/kernel-check/local-fold.cubin",
+      "/workspace/reax-release-v3-build/kernels/src/local-fold/local_fold.cu"
+    ],
+    "returncode": 0,
+    "sha256": "5edd0e99a78afe1812bc80e20aeddb1b2a3f7367f4892395ab73c0f931e0b3b1",
+    "expected": "5edd0e99a78afe1812bc80e20aeddb1b2a3f7367f4892395ab73c0f931e0b3b1",
+    "byte_identical": true
+  }
+]
