@@ -1,5 +1,5 @@
 REAX engine v3 combines the private post-v2 runtime with UID240's reviewed image.
-Inherited code and binaries are attributed to UID56, UID176, reviewed UID164,
+Inherited code and binaries are attributed to UID56, UID176, UID133, reviewed UID164,
 UID240 and our own UID57 v2. Original licenses, comments and source credits are
 preserved. No independent authorship is claimed for inherited implementations.
 The detailed parent digests and reuse paths are recorded in parents.json.

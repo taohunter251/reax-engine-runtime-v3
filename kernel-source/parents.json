@@ -27,6 +27,15 @@
     ]
   },
   {
+    "uid": 133,
+    "digest": "ec2ee6ed3df69903bf9df5420cde8f869280647ce7d23a3837a2397b2ce34272",
+    "files": [
+      "/opt/s1eng/",
+      "/opt/reax/",
+      "/opt/reax-v3/"
+    ]
+  },
+  {
     "uid": 240,
     "digest": "d57f7afa80e9e174132bdc5332e9064fd12de7bec6ba42f711a4752a3e36754a",
     "files": [
